@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vtm-corpus"
+version = "0.1.0"
+description = "OCR và dịch sách Y học cổ truyền Hán -> Việt"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pypdfium2>=4",
+  "pillow>=10",
+]
+
+[project.optional-dependencies]
+hunyuan = [
+  "torch",
+  "transformers>=4.57",
+  "accelerate",
+]
+translate = [
+  "torch",
+  "transformers>=4.57",
+  "accelerate",
+]
+paddle-cpu = [
+  "paddlepaddle",
+  "paddleocr[doc-parser]",
+]
+paddle-gpu = [
+  "paddlepaddle-gpu==3.2.1",
+  "paddleocr[doc-parser]",
+]
+report = ["pandas"]
+eval = ["pandas", "jiwer", "sacrebleu", "opencc"]
+
+[project.scripts]
+vtm = "vtm_corpus.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+exclude = ["tests*", "test*"]
