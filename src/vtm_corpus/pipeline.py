@@ -269,12 +269,28 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
 
     for j in jobs:
         j["restart"] = 0
+        j["model_log_offset"] = Path(j["log"]).stat().st_size if Path(j["log"]).exists() else 0
         start(j)
+
+    def show_model_logs() -> None:
+        for j in jobs:
+            with open(j["log"], encoding="utf-8", errors="replace") as stream:
+                stream.seek(j["model_log_offset"])
+                while True:
+                    offset = stream.tell()
+                    line = stream.readline()
+                    if not line or not line.endswith("\n"):
+                        stream.seek(offset)
+                        break
+                    if line.startswith("[model]"):
+                        log(f"{Path(j['log']).name}: {line.rstrip()}")
+                j["model_log_offset"] = stream.tell()
 
     refresh_progress()
     t0 = t_print = t_prog = time.time()
     while any(j["p"].poll() is None for j in jobs):
         time.sleep(5)
+        show_model_logs()
         if time.time() - t_prog >= 10:
             refresh_progress()
             t_prog = time.time()
@@ -302,6 +318,7 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
                     lines = []
                 last.append((lines or ["..."])[-1][-120:])
             log(f"[{(time.time() - t0) / 60:5.1f} phút] " + " | ".join(last))
+    show_model_logs()
     refresh_progress()
 
     for j in jobs:

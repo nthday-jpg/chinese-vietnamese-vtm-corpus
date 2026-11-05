@@ -104,6 +104,8 @@ class Dummy:
 
 class Hunyuan:
     def __init__(self, a):
+        started = time.monotonic()
+        print("[model] Hunyuan: bắt đầu import torch/transformers", flush=True)
         import torch
         from transformers import AutoProcessor
         try:
@@ -114,8 +116,10 @@ class Hunyuan:
         self.prompt = a.prompt or HUNYUAN_PROMPT
         self.dev = self._device(a.device)
         dtype = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}[a.dtype]
+        print(f"[model] Hunyuan: bắt đầu tải/đọc model {a.model} (dùng cache nếu có)", flush=True)
         self.proc = AutoProcessor.from_pretrained(a.model, trust_remote_code=True, use_fast=False)
         self.model = M.from_pretrained(a.model, dtype=dtype, trust_remote_code=True).to(self.dev).eval()
+        print(f"[model] Hunyuan: model sẵn sàng trên {self.dev}, sau {time.monotonic() - started:.1f}s", flush=True)
 
     @staticmethod
     def _device(requested: str) -> str:
@@ -143,9 +147,13 @@ class Hunyuan:
 
 class Paddle:
     def __init__(self, a):
+        started = time.monotonic()
+        print("[model] Paddle: bắt đầu import paddleocr", flush=True)
         from paddleocr import PaddleOCRVL
+        print(f"[model] Paddle: bắt đầu tải/khởi tạo PaddleOCR-VL {a.paddle_version} (dùng cache nếu có)", flush=True)
         self.pipe = PaddleOCRVL(pipeline_version=a.paddle_version, **json.loads(a.paddle_args))
         self.max_new = a.max_new
+        print(f"[model] Paddle: model sẵn sàng, sau {time.monotonic() - started:.1f}s", flush=True)
 
     def run(self, img_path):
         try:
