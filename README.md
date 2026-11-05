@@ -109,6 +109,15 @@ vẫn trên Kaggle. Paddle cần venv riêng (`paddle-cpu` hoặc `paddle-gpu`).
 Kaggle cho 30 giờ GPU/tuần, mỗi phiên tối đa 12 giờ.
 
 ## Bước 1 — OCR
+
+### Tiền xử lý đã thử và loại bỏ
+
+Hai cách tiền xử lý **xoá mực đỏ** bằng ngưỡng màu và **xoá nền** bằng ngưỡng
+xám cục bộ cho kết quả kém trên các trang scan đã thử: còn sót mực đỏ, tạo
+mảng trắng, làm mất nét chữ mờ và vẫn giữ viền scan tối. Các bộ tiền xử lý này
+đã bị loại bỏ, không tích hợp vào pipeline. Không nên dùng lại nếu chưa có
+phương pháp tốt hơn và kiểm tra chất lượng trên từng sách.
+
 - Notebook tự tìm mọi PDF trong Input, OCR từng trang trên cả 2 GPU, ghi ra
   `runs/ocr_<tên>_<hash>/txt/<tên sách>.txt`.
 - Layout vẽ các khung (tiêu đề, đoạn văn, bảng, hình…) trên vài trang mẫu, lưu ở
