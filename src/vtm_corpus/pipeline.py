@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from datetime import datetime, timezone
@@ -147,7 +148,17 @@ def list_pdfs(input_dir: str | Path) -> list[dict]:
         while name in used:
             name += "_"
         used.add(name)
-        entries.append({"name": name, "stem": p.stem, "path": str(p), "n_pages": _pdf_pages(p)})
+        entries.append({"name": name, "stem": p.stem, "path": str(p)})
+    # PDFium is not thread-safe: isolate concurrent document access in processes.
+    workers = min(len(files), os.cpu_count() or 1, 8)
+    if workers == 1:
+        page_counts = map(_pdf_pages, files)
+        for entry, count in zip(entries, page_counts):
+            entry["n_pages"] = count
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for entry, count in zip(entries, pool.map(_pdf_pages, files)):
+                entry["n_pages"] = count
     return entries
 
 
