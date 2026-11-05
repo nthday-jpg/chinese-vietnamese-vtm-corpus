@@ -15,6 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+swinir = ["torch>=2", "torchvision", "timm", "numpy"]
 hunyuan = [
   "torch",
   "transformers>=4.57",

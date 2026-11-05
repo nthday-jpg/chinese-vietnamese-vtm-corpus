@@ -73,9 +73,13 @@ def page_lines(rec: dict) -> list[str]:
 _DOCS = {}
 
 
-def render(src: str, page: int, dpi: int = 200, max_side: int = 1600):
+def render(src: str, page: int, dpi: int = 200, max_side: int = 1600,
+           swinir: bool = False, swinir_cache: str = "work/preprocessed"):
     """Trang PDF -> ảnh PIL (cạnh dài tối đa max_side)."""
     import pypdfium2 as pdfium
+    if swinir:
+        from .preprocess import cached_page
+        return cached_page(src, page, dpi, max_side, swinir_cache)
     if src not in _DOCS:
         _DOCS[src] = pdfium.PdfDocument(src)
     img = _DOCS[src][page].render(scale=dpi / 72).to_pil().convert("RGB")
@@ -207,6 +211,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--nshard", type=int, default=1)
     ap.add_argument("--dpi", type=int, default=200)
     ap.add_argument("--max-side", type=int, default=1600)
+    ap.add_argument("--swinir", action="store_true")
+    ap.add_argument("--swinir-cache", default="work/preprocessed")
     ap.add_argument("--max-new", type=int, default=6000)
     ap.add_argument("--dtype", default="fp32", choices=["fp32", "fp16", "bf16"])
     ap.add_argument("--model", default="tencent/HunyuanOCR")
@@ -243,6 +249,9 @@ def main(argv: list[str] | None = None) -> None:
     if not todo:
         return
 
+    if a.swinir:
+        from .restoration import resolve_assets
+        resolve_assets()
     engine = ENGINES[a.engine](a)
     tmp = Path(tempfile.mkdtemp()) / "page.png"
 
@@ -257,7 +266,8 @@ def main(argv: list[str] | None = None) -> None:
         inflight.write_text(f"{book}|{page}")
         signal.alarm(a.page_timeout)
         try:
-            img = render(t["src"], page, a.dpi, a.max_side)
+            img = render(t["src"], page, a.dpi, a.max_side, a.swinir,
+                         a.swinir_cache)
             img.save(tmp)
             text, extra = engine.run(str(tmp))
             signal.alarm(0)

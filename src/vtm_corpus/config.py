@@ -46,6 +46,8 @@ class OCRConfig:
     pages: str = ""                         # "" = cả sách; "1-10,15" = các trang chỉ định
     dpi: int = 200
     max_side: int = 1600
+    swinir: bool = False                    # same-resolution color denoising
+    swinir_cache: str = "work/preprocessed"  # shared resumable PNG cache
     max_new_tokens: int = 6000
     dtype: str = "fp32"                     # fp32 | fp16 | bf16 (hunyuan)
     model: str = "tencent/HunyuanOCR"
