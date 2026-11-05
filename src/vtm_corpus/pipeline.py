@@ -14,6 +14,8 @@ from fnmatch import fnmatch
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tqdm.auto import tqdm
+
 from . import ocr_worker
 from .config import OCRConfig, TranslateConfig
 
@@ -231,10 +233,22 @@ def _copy_resume(sources: list[str], dest: Path, kind: str) -> int:
     return n
 
 
-def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: int) -> None:
+def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: int,
+               *, progress: tqdm | None = None, progress_count=None) -> None:
     """Chạy các worker, tự khởi động lại nếu log đứng yên quá lâu."""
     if not jobs:
         return
+
+    def log(msg: str) -> None:
+        if progress is not None:
+            progress.write(msg)
+        else:
+            print(msg, flush=True)
+
+    def refresh_progress() -> None:
+        if progress is not None and progress_count is not None:
+            progress.n = min(progress_count(), progress.total or 0)
+            progress.refresh()
 
     def start(j: dict) -> None:
         j["p"] = subprocess.Popen(
@@ -246,11 +260,15 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
         j["restart"] = 0
         start(j)
 
-    t0 = t_print = time.time()
+    refresh_progress()
+    t0 = t_print = t_prog = time.time()
     while any(j["p"].poll() is None for j in jobs):
         time.sleep(5)
+        if time.time() - t_prog >= 10:
+            refresh_progress()
+            t_prog = time.time()
         if time.time() - t0 > budget_h * 3600:
-            print(f"!!! Hết {budget_h} giờ -> dừng, phần đã xong vẫn được giữ", flush=True)
+            log(f"!!! Hết {budget_h} giờ -> dừng, phần đã xong vẫn được giữ")
             for j in jobs:
                 if j["p"].poll() is None:
                     j["p"].terminate()
@@ -262,7 +280,7 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
                 j["p"].wait()
                 j["restart"] += 1
                 start(j)
-                print(f"!!! {Path(j['log']).name}: treo -> khởi động lại lần {j['restart']}", flush=True)
+                log(f"!!! {Path(j['log']).name}: treo -> khởi động lại lần {j['restart']}")
         if time.time() - t_print > 120:
             t_print = time.time()
             last = []
@@ -272,7 +290,8 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
                 except OSError:
                     lines = []
                 last.append((lines or ["..."])[-1][-120:])
-            print(f"[{(time.time() - t0) / 60:5.1f} phút] " + " | ".join(last), flush=True)
+            log(f"[{(time.time() - t0) / 60:5.1f} phút] " + " | ".join(last))
+    refresh_progress()
 
     for j in jobs:
         try:
@@ -280,10 +299,10 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
         except Exception:  # noqa: BLE001
             code = 1
         if code not in (0, -15):
-            print(f"\n!!! {Path(j['log']).name} lỗi, 20 dòng cuối:", flush=True)
+            log(f"\n!!! {Path(j['log']).name} lỗi, 20 dòng cuối:")
             try:
                 lines = Path(j["log"]).read_text(errors="ignore").splitlines()[-20:]
-                print("\n".join(lines), flush=True)
+                log("\n".join(lines))
             except OSError:
                 pass
 
@@ -401,6 +420,41 @@ def export_ocr(run_dir: str | Path, books: dict, name: str) -> dict:
     return {"pages": total, "done": total_ok, "missing": total_missing}
 
 
+def _ocr_progress_count(raw_dir: Path, books: dict, name: str,
+                        wanted: set[tuple[str, int]]) -> int:
+    """Số trang đã xong (kể cả trang bị bỏ qua) trong tập trang đang chọn."""
+    done: set[tuple[str, int]] = set()
+    for b in books:
+        done.update((b, p) for p in ocr_worker.load_results(raw_dir, b, name) if (b, p) in wanted)
+        for f in (raw_dir / b).glob(f"{name}_skip*.log"):
+            for token in f.read_text(encoding="utf-8", errors="ignore").split():
+                try:
+                    page = int(token)
+                except ValueError:
+                    continue
+                if (b, page) in wanted:
+                    done.add((b, page))
+    return len(done)
+
+
+def _dich_progress_count(raw_dir: Path, wanted: set[str]) -> int:
+    """Số đoạn đã dịch trong tập đoạn đang chọn."""
+    done: set[str] = set()
+    for f in raw_dir.glob("dich_shard*.jsonl"):
+        try:
+            lines = f.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                chunk_id = json.loads(line)["id"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+            if chunk_id in wanted:
+                done.add(chunk_id)
+    return len(done)
+
+
 def run_ocr(cfg: OCRConfig, *, books: dict | None = None, tasks: list[dict] | None = None) -> RunResult:
     name = cfg.run_name or cfg.engine
     run_dir = _run_dir(cfg.workdir, "ocr", name, cfg)
@@ -434,7 +488,16 @@ def run_ocr(cfg: OCRConfig, *, books: dict | None = None, tasks: list[dict] | No
     for k in range(n_gpu):
         cmd, env = _ocr_cmd(cfg, raw_dir, tasks_path, k, n_gpu, name, [], k)
         jobs.append({"cmd": cmd, "env": env, "log": raw_dir / f"_{name}_{k}.log", "label": name})
-    _supervise(jobs, cfg.budget_h, cfg.stall_min, cfg.max_restarts)
+    wanted_pages = {(t["book"], t["page"]) for t in tasks}
+
+    def count_done() -> int:
+        return _ocr_progress_count(raw_dir, books, name, wanted_pages)
+
+    with tqdm(total=len(tasks), desc=f"OCR {name}", unit="trang", dynamic_ncols=True) as bar:
+        bar.n = min(count_done(), len(tasks))
+        bar.refresh()
+        _supervise(jobs, cfg.budget_h, cfg.stall_min, cfg.max_restarts,
+                   progress=bar, progress_count=count_done)
 
     counts = export_ocr(run_dir, books, name) if cfg.export else {}
     _manifest(run_dir, cfg, "ocr", status="done", counts=counts,
@@ -565,7 +628,16 @@ def run_translate(cfg: TranslateConfig, *, books: dict | None = None,
         env["PYTHONPATH"] = _src_dir() + os.pathsep + env.get("PYTHONPATH", "")
         env["CUDA_VISIBLE_DEVICES"] = "" if cfg.device == "cpu" or cfg.engine == "dummy" else gpus
         jobs.append({"cmd": cmd, "env": env, "log": raw_dir / f"_dich_{k}.log", "label": "dich"})
-    _supervise(jobs, cfg.budget_h, cfg.stall_min, cfg.max_restarts)
+    wanted_chunks = {c["id"] for c in chunks}
+
+    def count_done() -> int:
+        return _dich_progress_count(raw_dir, wanted_chunks)
+
+    with tqdm(total=len(chunks), desc=f"Dịch {name}", unit="đoạn", dynamic_ncols=True) as bar:
+        bar.n = min(count_done(), len(chunks))
+        bar.refresh()
+        _supervise(jobs, cfg.budget_h, cfg.stall_min, cfg.max_restarts,
+                   progress=bar, progress_count=count_done)
 
     counts = export_translate(run_dir, books) if cfg.export else {}
     _manifest(run_dir, cfg, "dich", status="done", counts=counts)
