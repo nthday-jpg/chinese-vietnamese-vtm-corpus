@@ -7,7 +7,8 @@ name = "vtm-corpus"
 version = "0.1.0"
 description = "OCR và dịch sách Y học cổ truyền Hán -> Việt"
 readme = "README.md"
-requires-python = ">=3.10"
+# Paddle GPU 3.2.1 publishes wheels through Python 3.13.
+requires-python = ">=3.10,<3.14"
 dependencies = [
   "pypdfium2>=4",
   "pillow>=10",
@@ -16,18 +17,15 @@ dependencies = [
 
 [project.optional-dependencies]
 hunyuan = [
-  "torch",
-  "transformers>=4.57",
+  "torch>=2.6",
+  "torchvision",
+  "transformers>=5.13",
   "accelerate",
 ]
 translate = [
-  "torch",
+  "torch>=2.6",
   "transformers>=4.57",
   "accelerate",
-]
-paddle-cpu = [
-  "paddlepaddle",
-  "paddleocr[doc-parser]",
 ]
 paddle-gpu = [
   "paddlepaddle-gpu==3.2.1",
@@ -35,6 +33,23 @@ paddle-gpu = [
 ]
 report = ["pandas"]
 eval = ["pandas", "jiwer", "sacrebleu", "opencc"]
+notebook = ["ipykernel>=6.29.5", "ipywidgets>=8"]
+
+# Use the official CUDA 12.6 wheels for a shared NVIDIA GPU environment.
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+paddlepaddle-gpu = { index = "paddle-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "paddle-cu126"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+explicit = true
 
 [project.scripts]
 vtm = "vtm_corpus.cli:main"

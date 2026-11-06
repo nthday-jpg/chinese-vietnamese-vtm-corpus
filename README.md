@@ -11,6 +11,7 @@ PDF sách Hán (scan) ──► Bước 1: OCR ──► .txt chữ Hán ──�
 | `1_ocr_hunyuan.ipynb` | Bước 1 bằng **HunyuanOCR** (Tencent) |
 | `1_ocr_paddle.ipynb` | Bước 1 bằng **PaddleOCR-VL** (Baidu) |
 | `2_dich_han_viet.ipynb` | Bước 2: dịch bằng một LLM nhỏ tuỳ chọn |
+| `3_so_sanh_so_chu_ocr.ipynb` | Chạy lần lượt Hunyuan/Paddle rồi so số chữ bằng một bảng ngắn |
 | `PROBLEM.md` | Mô tả bài toán: input / output của từng bước |
 | `FLOW.md` | Giải thích từng bước notebook làm gì + gợi ý các cách làm khác |
 
@@ -39,6 +40,51 @@ Mỗi run ghi `run_manifest.json` (toàn bộ cấu hình đã dùng), và thư 
 
 Kết quả nằm trong `runs/ocr_*/txt/`, `runs/ocr_*/layout/`, `runs/dich_*/dich/` và
 được hiển thị trực tiếp trong notebook ở các ô report — không cần tải file về.
+
+## So sánh tự động số lượng chữ của hai model OCR
+
+Mở [`3_so_sanh_so_chu_ocr.ipynb`](3_so_sanh_so_chu_ocr.ipynb), chọn kernel `.venv`
+và **Run All**. Notebook tự tải Hunyuan, OCR phần dữ liệu đã chọn, giải phóng model,
+rồi tải Paddle và OCR đúng cùng dữ liệu, sau đó mới so sánh. Cần GPU/model như các
+notebook OCR gốc. Nếu thiếu dependency, chạy `uv sync --all-extras` rồi restart kernel.
+
+- Mặc định chỉ thử `1.pdf`, trang 1–2. Chỉnh `BOOKS`, `MAX_BOOKS`, `PAGES`, `LIMIT`
+  trong ô cấu hình: `MAX_BOOKS` giới hạn số file sau khi lọc tên, `LIMIT` giới hạn
+  tổng số trang trên toàn bộ file được chọn. Muốn toàn bộ data: `BOOKS=[]`,
+  `MAX_BOOKS=None`, `PAGES=""`, `LIMIT=None`.
+- Các argument riêng nằm trong hai `OCRConfig` là `HUNYUAN` và `PADDLE`.
+  `USE_BOOK_PROFILES=True` nạp JSON riêng của từng PDF; đặt `False` để dùng trực tiếp
+  DPI/`max_side`/giới hạn token trong notebook. Trước khi chạy, notebook in tổng số
+  file và số trang sẽ xử lý.
+- Mỗi model được tải một lần để xử lý mọi sách của stage, trừ khi phải khởi động
+  lại sau timeout. Hai stage chạy chờ hoàn tất ngay trong notebook; không có runner
+  nền riêng. Kết quả lưu sau từng trang, chạy lại cùng cấu hình sẽ tiếp tục phần còn thiếu.
+- Model chạy trong tiến trình riêng để giải phóng VRAM khi kết thúc. Interrupt ô
+  đang chạy sẽ dừng worker của ô đó. Đổi `WORK_DIR` để làm thử nghiệm mới.
+- Ghép theo tên sách và số trang PDF; phân biệt trang thiếu kết quả, trang không được
+  chọn chạy và trang có 0 chữ. Loại lượt layout riêng và cache ngoài tập trang chọn.
+- Mặc định đếm chữ Hán sau khi bỏ định dạng Markdown/HTML. Có thể đổi sang mọi ký tự
+  không trắng bằng `COUNT_MODE="visible"`.
+- Chỉ hiển thị một bảng theo sách: số trang đã OCR của hai model, số trang ghép cặp,
+  tổng chữ trên phần ghép cặp và độ khớp số lượng. Có dòng tổng nếu chọn nhiều sách.
+  Không vẽ biểu đồ hoặc xuất báo cáo HTML/CSV/PNG. Checkpoint OCR vẫn được lưu để tiếp tục.
+
+CLI dùng cùng pipeline, mặc định cũng chỉ 1 PDF/2 trang:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts/run_full_corpus_ocr.py
+# Chỉ lập kế hoạch, không tải model:
+.\.venv\Scripts\python.exe -X utf8 scripts/run_full_corpus_ocr.py --books 1 2 --pages 1-2 --limit 2 --prepare-only
+# Chạy mọi PDF/mọi trang khi chủ động chọn:
+.\.venv\Scripts\python.exe -X utf8 scripts/run_full_corpus_ocr.py --all
+```
+
+Độ khớp số lượng mỗi trang là `min(H,P)/max(H,P)`; điểm tổng là
+`Σmin(Hᵢ,Pᵢ)/Σmax(Hᵢ,Pᵢ)` trên các trang có output cả hai. Hai bên cùng 0 chữ không
+có điểm; thiếu output không được thay bằng 0. Nếu còn PDF nguồn thì so SHA-256 để
+tránh ghép nhầm file; khi không truy cập được PDF, notebook cảnh báo chưa xác minh nguồn.
+**Đây không phải độ chính xác OCR**: hai bản có cùng số chữ vẫn có thể sai nội dung.
+Các bộ lọc bỏ tiêu đề/chú thích khác nhau cũng có thể gây chênh lệch số lượng.
 
 ## Chọn tập sách (mỗi sách có thể cần cấu hình khác nhau)
 
@@ -74,29 +120,94 @@ vtm list --input-dir work/runs/ocr_xxx/txt --kind txt --min-han 50
 vtm ocr --set input_dir=data --set 'books=["*ky_huyet*"]'
 ```
 
-## Chạy local (CPU)
+## Chạy local Windows (Python 3.13, RTX 4060 Laptop 8 GB)
 
-Dùng `uv` để tạo venv nhẹ; chỉ cần `pypdfium2`, `pillow` cho pipeline và engine
-`dummy` để test/resume/report mà không tải model:
+Cấu hình local được đặt cho máy i7-13650HX, khoảng 24 GB RAM và 1 GPU RTX 4060
+Laptop 8 GB. `.python-version` chọn Python 3.13. Dùng chung **một `.venv`** cho
+CLI và cả ba notebook, kể cả Paddle GPU:
 
-```bash
-uv venv .venv --python 3.12
-uv pip install --python .venv/bin/python -e .
-source .venv/bin/activate
+```powershell
+uv sync --python 3.13 --all-extras
+.\.venv\Scripts\Activate.ps1
+vtm list --input-dir data --kind pdf
 
-# OCR giả lập 2 trang, không cần GPU/model
-vtm ocr --set engine=dummy --set input_dir=data --set pages=1-2 --set n_layout=0
-
-# Dịch giả lập từ output OCR vừa tạo (trỏ vào đúng run/txt)
-vtm translate --set engine=dummy --set input_dir=work/runs/ocr_smoke_.../txt --set limit=2
-
-# Xem tổng hợp
-vtm report --kind ocr --workdir work
+# OCR thật 2 trang đầu của data/1.pdf
+vtm ocr --config configs/ocr_local.json
 ```
 
-Muốn chạy model thật trên CPU: cài thêm extra tương ứng và đặt `engine`, `device="cpu"`.
-Hunyuan/Paddle 1B trên CPU rất chậm; nên chỉ chạy vài trang để đánh giá, còn full run
-vẫn trên Kaggle. Paddle cần venv riêng (`paddle-cpu` hoặc `paddle-gpu`).
+TOML khai báo các kho wheel chính thức CUDA 12.6 cho PyTorch và Paddle GPU;
+dùng `uv sync` để áp dụng cấu hình kho này. Không cài thêm `paddlepaddle` bản CPU.
+
+| | Mặc định local |
+|---|---|
+| OCR | HunyuanOCR, FP16, DPI 200, cạnh dài tối đa 1280, tối đa 4096 token/trang |
+| Dịch | Qwen2.5-3B-Instruct, FP16 trên GPU, batch 1, 1 GPU/model |
+| Layout | Tắt; bật `n_layout` khi cần xem riêng |
+| Đầu vào / kết quả | `data/` / `work/runs/` |
+
+Đây là cấu hình khởi đầu để giảm nhu cầu VRAM, chưa phải kết quả benchmark GPU.
+OCR và dịch chạy lần lượt trong các tiến trình riêng để giải phóng model giữa hai bước.
+Nếu OCR báo chạm giới hạn token, kiểm tra trang đó và tăng `max_new_tokens`; trang
+nhiều chữ nhỏ có thể cần tăng `max_side` lên 1600. Cấu hình thay đổi tạo run mới.
+
+Sau OCR, lấy đường dẫn `output_dir` được in ra làm đầu vào dịch:
+
+```powershell
+# Thay <hash> bằng thư mục thực tế vừa được tạo
+vtm translate --set input_dir=work/runs/ocr_hunyuan_<hash>/txt
+vtm report --kind dich --workdir work
+```
+
+Trong VS Code, chọn `.venv\Scripts\python.exe` bằng **Python: Select Interpreter**
+và **Select Kernel** cho mỗi notebook. Chạy notebook từ thư mục gốc repo. Khi chạy
+local, notebook không tự `pip install`, không tạo môi trường Paddle riêng, và dùng
+cấu hình 1 GPU. Notebook OCR mặc định chọn profile `"1"` và 2 trang của `data/1.pdf`;
+đổi `BOOK_CONFIG` để chọn sách khác, rồi đổi `pages=""` khi muốn OCR cả sách. Notebook dịch lấy thư mục
+`txt/` của run OCR mới nhất; có thể sửa `INPUT_DIR` trong ô liệt kê để chọn run khác.
+Trên Kaggle, notebook giữ đường dẫn và cấu hình nhiều GPU của Kaggle.
+
+Worker OCR dùng bộ đếm thời gian riêng trên Windows: trang quá `page_timeout` được
+ghi vào skip log, worker dừng rồi khởi động lại để xử lý trang tiếp theo, trong giới
+hạn `max_restarts`. Trên Unix vẫn dùng `SIGALRM`.
+
+Có thể kiểm tra pipeline mà không tải model bằng `--set engine=dummy`. Bộ kiểm tra
+local bao gồm OCR, resume, dịch, đường dẫn Unicode và timeout/restart trên Windows:
+
+```powershell
+uv run --all-extras python -m unittest discover -s tests -v
+```
+
+## Kiểm tra độ phân giải ảnh trước khi chọn `max_side`
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts/check_max_side.py
+```
+
+Script quét mọi trang trong `data/`, tính mức `max_side` nhỏ nhất không thu nhỏ ảnh
+sau render, kiểm tra DPI so với ảnh scan nhúng và tạo ảnh so sánh trên các trang
+mẫu. Kết quả và cấu hình theo từng PDF nằm trong `work/max_side_check/`.
+Không sửa cấu hình pipeline hiện tại. Xem [hướng dẫn và cách đọc kết quả](scripts/README.md).
+
+## OCR theo cấu hình riêng của từng PDF
+
+Đã có 8 profile trong [`configs/ocr_books/`](configs/ocr_books/README.md), dựa trên
+kích thước trang và độ phân giải scan thực tế. Trong ô cấu hình notebook OCR:
+
+```python
+BOOK_CONFIG = "1"  # 1, 2, 3, 4, 5, 6, bien, kinh; None = sửa cấu hình thủ công
+```
+
+Hoặc chạy CLI:
+
+```powershell
+.\.venv\Scripts\vtm.exe ocr --config configs/ocr_books/1.json --set pages=50-51
+```
+
+JSON có thể đặt riêng `dpi`, `max_side`, `max_new_tokens`, `prompt` và các trường
+của `OCRConfig`. Giá trị JSON ghi đè cấu hình chung của notebook; cấu hình có hiệu
+lực được in ra để kiểm tra. Các profile hiện tại giữ độ chính xác số và engine
+đã chọn trong notebook, chỉ chọn sách và chỉnh tham số ảnh/giới hạn sinh.
+Đây là điểm xuất phát để thử OCR, chưa phải cấu hình đã xác nhận tối ưu chất lượng.
 
 ## Chuẩn bị trên Kaggle
 1. Upload `data/` thành một Dataset (*Datasets → New Dataset*, kéo thả file zip).

@@ -12,3 +12,5 @@ runs/
 .ipynb_checkpoints/
 
 data/
+configs/
+tests/
