@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 HUNYUAN_PROMPT = ("提取文档图片中正文的所有信息用markdown格式表示，其中页眉、页脚部分忽略，"
@@ -45,9 +46,9 @@ class OCRConfig:
     run_name: str = ""                      # "" = dùng engine
     pages: str = ""                         # "" = cả sách; "1-10,15" = các trang chỉ định
     dpi: int = 200
-    max_side: int = 1600
-    max_new_tokens: int = 6000
-    dtype: str = "fp32"                     # fp32 | fp16 | bf16 (hunyuan)
+    max_side: int = 1280
+    max_new_tokens: int = 4096
+    dtype: str = "fp16"                     # fp32 | fp16 | bf16 (hunyuan)
     model: str = "tencent/HunyuanOCR"
     prompt: str = ""                        # "" = HUNYUAN_PROMPT
     repetition_penalty: float = 1.08
@@ -61,7 +62,7 @@ class OCRConfig:
     budget_h: float = 10.5
     stall_min: int = 15
     max_restarts: int = 5
-    n_layout: int = 3                       # số trang vẽ layout; 0 = tắt
+    n_layout: int = 0                       # bật khi cần; layout Hunyuan tải model thêm một lượt
     layout_budget_h: float = 1.0            # ngân sách riêng cho lượt layout
     layout_prompt: str = LAYOUT_PROMPT
     export: bool = True                     # ghi txt/<book>.txt sau khi chạy
@@ -87,19 +88,42 @@ class OCRConfig:
         return dataclasses.asdict(self)
 
 
+def load_ocr_config(path: str | Path, *, base: OCRConfig | None = None) -> OCRConfig:
+    """Load a JSON OCR config over a copy of the notebook/runtime configuration.
+
+    Fields omitted from the JSON (engine, input_dir, workdir, worker_python,
+    pages, etc.) keep the values from base. The original base is not modified.
+    """
+    path = Path(path)
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: OCR config must be a JSON object")
+    known = {f.name for f in dataclasses.fields(OCRConfig)}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(f"{path}: unknown OCR config fields: {sorted(unknown)}")
+    if "books" in data and (not isinstance(data["books"], list) or
+                            any(not isinstance(book, str) or not book for book in data["books"])):
+        raise ValueError(f"{path}: books must be a list of nonempty strings")
+    # Copy nested values too: editing one loaded config must not affect another.
+    values = (base or OCRConfig()).to_dict()
+    values.update(data)
+    return OCRConfig(**values)
+
+
 @dataclass
 class TranslateConfig:
     """Cấu hình bước dịch. Mọi trường đều có thể sửa từ notebook."""
 
     engine: str = "hf"                      # hf | dummy
-    model: str = "Qwen/Qwen2.5-7B-Instruct"
+    model: str = "Qwen/Qwen2.5-3B-Instruct"
     input_dir: str = "work/runs"            # thư mục chứa .txt (glob đệ quy)
     books: list[str] = field(default_factory=list)  # [] = tất cả; tên hoặc glob
     workdir: str = "work"
     run_name: str = ""                      # "" = tên model
-    gpu_per_model: int = 2                  # 1: model <= 4B; 2: model 7-8B
+    gpu_per_model: int = 1                  # mặc định cho 1 GPU 8 GB; 2: model 7-8B trên Kaggle
     load_4bit: bool = False
-    batch: int = 8
+    batch: int = 1
     chunk_chars: int = 300
     max_new_tokens: int = 1200
     temperature: float = 0.0

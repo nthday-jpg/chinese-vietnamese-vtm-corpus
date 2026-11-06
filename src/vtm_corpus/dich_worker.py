@@ -34,7 +34,7 @@ def build_prompt(tok, system: str, user: str) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="bỏ qua khi --engine dummy")
+    ap.add_argument("--model", default="Qwen/Qwen2.5-3B-Instruct", help="bỏ qua khi --engine dummy")
     ap.add_argument("--engine", default="hf", choices=["hf", "dummy"],
                     help="hf = transformers; dummy = không tải model, chỉ test pipeline")
     ap.add_argument("--chunks", required=True, help='jsonl, mỗi dòng {"id", "zh"}')
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--nshard", type=int, default=1)
-    ap.add_argument("--batch", type=int, default=8)
+    ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--max-new", type=int, default=1200)
     ap.add_argument("--temperature", type=float, default=0.0, help="0 = luôn chọn từ chắc nhất")
     ap.add_argument("--rep-penalty", type=float, default=1.05)

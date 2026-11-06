@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import signal
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 HUNYUAN_PROMPT = ("提取文档图片中正文的所有信息用markdown格式表示，其中页眉、页脚部分忽略，"
@@ -179,6 +182,43 @@ class Paddle:
 
 ENGINES = {"hunyuan": Hunyuan, "paddle": Paddle, "dummy": Dummy}
 
+# The supervisor restarts a Windows worker after a hard page timeout.
+PAGE_TIMEOUT_EXIT = 124
+
+
+@contextmanager
+def page_deadline(seconds: int, on_hard_timeout):
+    """Unix: interrupt the page; Windows: stop the worker so CUDA cannot keep running."""
+    if seconds <= 0:
+        yield
+        return
+    if hasattr(signal, "SIGALRM"):
+        def expire(signum, frame):
+            raise TimeoutError(f"quá {seconds}s")
+
+        previous = signal.signal(signal.SIGALRM, expire)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+    else:
+        def expire():
+            try:
+                on_hard_timeout()
+            finally:
+                os._exit(PAGE_TIMEOUT_EXIT)
+
+        timer = threading.Timer(seconds, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            yield
+        finally:
+            timer.cancel()
+            timer.join()
+
 
 def result_file(out: Path, book: str, name: str, shard: int) -> Path:
     return out / book / f"{name}_shard{shard}.jsonl"
@@ -188,12 +228,13 @@ def load_results(out: Path, book: str, name: str) -> dict[int, dict]:
     """{trang: bản ghi} của 1 sách, gộp mọi shard (dòng hỏng thì bỏ)."""
     recs = {}
     for f in sorted((out / book).glob(f"{name}_shard*.jsonl")):
-        for line in open(f, encoding="utf-8"):
-            try:
-                r = json.loads(line)
-                recs[r["page"]] = r
-            except (json.JSONDecodeError, KeyError):
-                pass
+        with open(f, encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    r = json.loads(line)
+                    recs[r["page"]] = r
+                except (json.JSONDecodeError, KeyError):
+                    pass
     return recs
 
 
@@ -206,9 +247,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--nshard", type=int, default=1)
     ap.add_argument("--dpi", type=int, default=200)
-    ap.add_argument("--max-side", type=int, default=1600)
-    ap.add_argument("--max-new", type=int, default=6000)
-    ap.add_argument("--dtype", default="fp32", choices=["fp32", "fp16", "bf16"])
+    ap.add_argument("--max-side", type=int, default=1280)
+    ap.add_argument("--max-new", type=int, default=4096)
+    ap.add_argument("--dtype", default="fp16", choices=["fp32", "fp16", "bf16"])
     ap.add_argument("--model", default="tencent/HunyuanOCR")
     ap.add_argument("--prompt", default="", help="hunyuan: prompt OCR thay cho prompt mặc định")
     ap.add_argument("--rep-penalty", type=float, default=1.08)
@@ -220,7 +261,8 @@ def main(argv: list[str] | None = None) -> None:
     a = ap.parse_args(argv)
     name, out = a.name or a.engine, Path(a.out)
 
-    tasks = [json.loads(l) for l in open(a.tasks, encoding="utf-8") if l.strip()]
+    with open(a.tasks, encoding="utf-8") as stream:
+        tasks = [json.loads(l) for l in stream if l.strip()]
     mine = [t for i, t in enumerate(tasks) if i % a.nshard == a.shard]
     done, skip = set(), set()
     for book in {t["book"] for t in mine}:
@@ -230,7 +272,7 @@ def main(argv: list[str] | None = None) -> None:
     # trang đang chạy dở khi worker bị giết vì treo -> ghi vào skip, không thử lại
     inflight = out / f"_inflight_{name}_{a.shard}"
     if inflight.exists():
-        book, _, p = inflight.read_text().rpartition("|")
+        book, _, p = inflight.read_text(encoding="utf-8").rpartition("|")
         if book and (book, int(p)) not in done:
             with open(out / book / f"{name}_skip.log", "a") as f:
                 f.write(p + "\n")
@@ -246,21 +288,24 @@ def main(argv: list[str] | None = None) -> None:
     engine = ENGINES[a.engine](a)
     tmp = Path(tempfile.mkdtemp()) / "page.png"
 
-    def on_timeout(signum, frame):
-        raise TimeoutError(f"quá {a.page_timeout}s")
-    signal.signal(signal.SIGALRM, on_timeout)
-
     t_start = time.time()
     for n, t in enumerate(todo, 1):
         book, page, t0 = t["book"], t["page"], time.time()
         (out / book).mkdir(parents=True, exist_ok=True)
-        inflight.write_text(f"{book}|{page}")
-        signal.alarm(a.page_timeout)
+        inflight.write_text(f"{book}|{page}", encoding="utf-8")
+
+        def hard_timeout():
+            with open(out / book / f"{name}_skip.log", "a", encoding="utf-8") as f:
+                f.write(f"{page}\n")
+            inflight.unlink(missing_ok=True)
+            print(f"[{name}#{a.shard}] {book} tr.{page + 1}: quá {a.page_timeout}s -> bỏ qua, khởi động lại worker",
+                  flush=True)
+
         try:
-            img = render(t["src"], page, a.dpi, a.max_side)
-            img.save(tmp)
-            text, extra = engine.run(str(tmp))
-            signal.alarm(0)
+            with page_deadline(a.page_timeout, hard_timeout):
+                img = render(t["src"], page, a.dpi, a.max_side)
+                img.save(tmp)
+                text, extra = engine.run(str(tmp))
             rec = {"page": page, "text": text, "w": img.width, "h": img.height,
                    "sec": round(time.time() - t0, 1), **extra}
             with open(result_file(out, book, name, a.shard), "a", encoding="utf-8") as f:
@@ -269,7 +314,6 @@ def main(argv: list[str] | None = None) -> None:
             print(f"[{name}#{a.shard}] {n}/{len(todo)} {book} tr.{page + 1}: {rec['sec']}s, "
                   f"{len(text)} ký tự | còn ~{eta:.0f} phút", flush=True)
         except Exception as e:  # noqa: BLE001 - 1 trang lỗi không làm dừng cả lượt
-            signal.alarm(0)
             if isinstance(e, TimeoutError):
                 with open(out / book / f"{name}_skip.log", "a") as f:
                     f.write(f"{page}\n")

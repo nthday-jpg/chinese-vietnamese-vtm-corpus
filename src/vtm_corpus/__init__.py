@@ -1,6 +1,6 @@
 """VTM corpus: OCR sách Hán scan và dịch sang tiếng Việt."""
 
-from .config import LAYOUT_PROMPT, OCRConfig, ReportConfig, TranslateConfig
+from .config import LAYOUT_PROMPT, OCRConfig, ReportConfig, TranslateConfig, load_ocr_config
 from .pipeline import (
     RunResult,
     export_ocr,
@@ -24,7 +24,7 @@ from .report import (
 )
 
 __all__ = [
-    "OCRConfig", "TranslateConfig", "ReportConfig", "LAYOUT_PROMPT",
+    "OCRConfig", "TranslateConfig", "ReportConfig", "LAYOUT_PROMPT", "load_ocr_config",
     "RunResult", "run_ocr", "run_translate", "export_ocr", "export_translate",
     "find_run", "list_pdfs", "list_texts", "select_entries",
     "ocr_summary", "translate_summary", "show_ocr_report", "show_translate_report",

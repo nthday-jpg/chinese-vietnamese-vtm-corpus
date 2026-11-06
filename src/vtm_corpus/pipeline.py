@@ -262,10 +262,11 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
             progress.refresh()
 
     def start(j: dict) -> None:
-        j["p"] = subprocess.Popen(
-            j["cmd"], stdout=open(j["log"], "a"), stderr=subprocess.STDOUT,
-            env=j["env"], cwd=j.get("cwd"),
-        )
+        with open(j["log"], "a", encoding="utf-8") as stream:
+            j["p"] = subprocess.Popen(
+                j["cmd"], stdout=stream, stderr=subprocess.STDOUT,
+                env=j["env"], cwd=j.get("cwd"),
+            )
 
     for j in jobs:
         j["restart"] = 0
@@ -288,7 +289,14 @@ def _supervise(jobs: list[dict], budget_h: float, stall_min: int, max_restarts: 
 
     refresh_progress()
     t0 = t_print = t_prog = time.time()
-    while any(j["p"].poll() is None for j in jobs):
+    while True:
+        for j in jobs:
+            if j["p"].poll() == ocr_worker.PAGE_TIMEOUT_EXIT and j["restart"] < max_restarts:
+                j["restart"] += 1
+                start(j)
+                log(f"!!! {Path(j['log']).name}: quá thời gian/trang -> khởi động lại lần {j['restart']}")
+        if not any(j["p"].poll() is None for j in jobs):
+            break
         time.sleep(5)
         show_model_logs()
         if time.time() - t_prog >= 10:
@@ -354,6 +362,8 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         *extra,
     ]
     env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONPATH"] = _src_dir() + os.pathsep + env.get("PYTHONPATH", "")
     if cfg.device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
@@ -579,12 +589,13 @@ def build_translate_chunks(cfg: TranslateConfig) -> tuple[dict[str, list[dict]],
 def load_dich(run_dir: str | Path) -> dict[str, dict]:
     out = {}
     for f in (Path(run_dir) / "dich_raw").glob("dich_shard*.jsonl"):
-        for line in open(f, encoding="utf-8"):
-            try:
-                r = json.loads(line)
-                out[r["id"]] = r
-            except (json.JSONDecodeError, KeyError):
-                pass
+        with open(f, encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    r = json.loads(line)
+                    out[r["id"]] = r
+                except (json.JSONDecodeError, KeyError):
+                    pass
     return out
 
 
@@ -653,6 +664,8 @@ def run_translate(cfg: TranslateConfig, *, books: dict | None = None,
         if cfg.load_4bit:
             cmd.append("--load-4bit")
         env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONPATH"] = _src_dir() + os.pathsep + env.get("PYTHONPATH", "")
         env["CUDA_VISIBLE_DEVICES"] = "" if cfg.device == "cpu" or cfg.engine == "dummy" else gpus
         jobs.append({"cmd": cmd, "env": env, "log": raw_dir / f"_dich_{k}.log", "label": "dich"})
