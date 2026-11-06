@@ -50,9 +50,6 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("ocr", help="OCR PDF -> txt chữ Hán")
     _common(p)
 
-    p = sub.add_parser("preprocess", help="render + SwinIR -> cached PNG pages (resume)")
-    _common(p)
-
     p = sub.add_parser("translate", help="dịch txt chữ Hán -> txt tiếng Việt")
     _common(p)
 
@@ -74,14 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workdir", default="work")
 
     a = ap.parse_args(argv)
-    if a.cmd == "preprocess":
-        from .preprocess import run_preprocess
-        cfg = _apply(OCRConfig, a.config, a.set)
-        try:
-            run_preprocess(cfg)
-        except (ValueError, FileNotFoundError, RuntimeError) as exc:
-            raise SystemExit(str(exc)) from exc
-    elif a.cmd == "ocr":
+    if a.cmd == "ocr":
         cfg = _apply(OCRConfig, a.config, a.set)
         try:
             res = run_ocr(cfg)

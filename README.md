@@ -110,64 +110,6 @@ Kaggle cho 30 giờ GPU/tuần, mỗi phiên tối đa 12 giờ.
 
 ## Bước 1 — OCR
 
-### SwinIR tùy chọn: khử nhiễu, không phóng to
-
-#### Dataset lớn: tiền xử lý một lần, OCR nhiều lần
-
-```bash
-pip install -e '.[swinir]'
-# Chạy riêng trên GPU; bỏ pages để xử lý toàn bộ dataset.
-vtm preprocess --set input_dir=data
-
-# Sau khi preprocess kết thúc, OCR tái sử dụng các PNG đã lưu.
-vtm ocr --set input_dir=data --set swinir=true
-```
-
-`vtm preprocess` luôn chạy SwinIR, không tải model OCR. Tự dùng CUDA nếu PyTorch
-phát hiện GPU khả dụng, nếu không dùng CPU. PNG lossless được lưu trong
-`work/preprocessed/<cache-key>/page_00001.png`, kèm `manifest.json` cho mỗi PDF/cấu hình.
-Chạy lại cùng lệnh sẽ bỏ qua trang đã lưu; file hỏng được tạo lại. Model chỉ tải
-một lần trong tiến trình, giải phóng khi giai đoạn kết thúc. Dừng giữa chừng có
-thể chạy lại để tiếp tục. Lỗi một trang dừng lệnh, nhưng giữ các trang đã xong.
-
-Hai lệnh phải dùng cùng `dpi`, `max_side` và model để khớp cache; cache dùng chung CPU/GPU.
-Đặt `swinir_cache` nếu muốn đổi thư mục (dùng cùng đường dẫn cho hai giai đoạn).
-Cache key gồm SHA-256 nội dung PDF, mã model, weights và tham số render/inference;
-không phụ thuộc engine OCR. OCR và layout đọc cache, chỉ khử nhiễu lại nếu trang
-chưa có. Giữ asset cache SwinIR để dùng offline; lần đọc PNG không cần tải model
-vào GPU. Cần dự trù dung lượng đĩa cho hơn 1.000 PNG, không thay đổi PDF gốc.
-
-Notebook có thể gọi `from vtm_corpus.preprocess import run_preprocess`, rồi
-`run_preprocess(OCRConfig(input_dir="data"))` trước OCR.
-Nên so sánh 10–20 trang trước (`pages="1-20"`) vì khử nhiễu có thể mất nét mờ.
-
-SwinIR chạy **color denoising ở kích thước hiện tại**, sau giới hạn `max_side`;
-không có upscale 2×/4×. Mặc định tắt. Dùng checkpoint **color denoising**, không
-dùng checkpoint SR hoặc grayscale. Chưa xác nhận cải thiện độ chính xác OCR;
-khử nhiễu có thể làm mất nét chữ mờ.
-
-```bash
-pip install -e '.[swinir]'
-vtm ocr --set input_dir=data --set pages=10 --set swinir=true
-```
-
-Chỉ cần `OCRConfig(swinir=True)` trong notebook. Lần đầu tự tải mã kiến trúc
-từ commit cố định `6545850fbf8df298df73d81f3e8cba638787c8bd` của SwinIR
-và checkpoint `005_colorDN_DFWB_s128w8_SwinIR-M_noise15.pth` từ release chính thức
-https://github.com/JingyunLiang/SwinIR/releases/tag/v0.0.
-Mã Python tải về sẽ được import để tạo model. Cache nằm ở
-`~/.cache/vtm_corpus/swinir/` (hoặc `$XDG_CACHE_HOME/vtm_corpus/swinir/`);
-lần sau dùng lại, không cần mạng. Các worker dùng khóa file và tải nguyên tử
-để không đọc file đang tải dở. Cần bật Internet trong lần chạy đầu.
-
-Offline: giữ nguyên asset cache đã tải. Không cần cấu hình đường dẫn repo,
-checkpoint hoặc device. Cần PyTorch CUDA để dùng GPU; có thể ẩn GPU bằng
-`CUDA_VISIBLE_DEVICES=""` khi chạy giai đoạn preprocess để ép CPU.
-Paddle và PyTorch có thể cùng chiếm GPU nếu cache còn thiếu trang.
-Model được cache trong mỗi tiến trình,
-chạy theo tile để giảm bộ nhớ; ảnh layout dùng cùng bước khử nhiễu.
-Các tham số SwinIR nằm trong config hash nên cache OCR bật/tắt không trộn lẫn.
-
 ### Tiền xử lý đã thử và loại bỏ
 
 Hai cách tiền xử lý **xoá mực đỏ** bằng ngưỡng màu và **xoá nền** bằng ngưỡng

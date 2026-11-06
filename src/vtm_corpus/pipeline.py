@@ -353,9 +353,6 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--page-timeout", str(cfg.page_timeout),
         *extra,
     ]
-    if cfg.swinir:
-        cmd.extend(["--swinir",
-                    "--swinir-cache", cfg.swinir_cache])
     env = os.environ.copy()
     env["PYTHONPATH"] = _src_dir() + os.pathsep + env.get("PYTHONPATH", "")
     if cfg.device == "cpu":
@@ -381,8 +378,7 @@ def _parse_layout(text: str, w: int, h: int) -> list[tuple[str, list[float]]]:
 def _draw_boxes(t: dict, boxes: list[tuple[str, list[float]]], out_dir: Path,
                 engine: str, cfg: OCRConfig) -> Path:
     from PIL import ImageDraw, ImageFont
-    img = ocr_worker.render(t["src"], t["page"], cfg.dpi, cfg.max_side, cfg.swinir,
-                            cfg.swinir_cache)
+    img = ocr_worker.render(t["src"], t["page"], cfg.dpi, cfg.max_side)
     d = ImageDraw.Draw(img)
     font = ImageFont.load_default(size=max(14, img.width // 60))
     labels = sorted({l for l, _ in boxes})
