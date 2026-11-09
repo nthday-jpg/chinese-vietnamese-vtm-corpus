@@ -203,20 +203,3 @@ def show_translation_pairs(run_dir: str | Path, cfg: ReportConfig | None = None,
             break
     if not shown:
         print("(chưa có bản dịch)")
-
-
-def show_compare(run_dirs: list[str | Path], cfg: ReportConfig | None = None,
-                 book: str | None = None) -> None:
-    """So sánh text OCR của nhiều run trên cùng trang."""
-    cfg = cfg or ReportConfig()
-    maps = []
-    for d in run_dirs:
-        maps.append((Path(d).name, _raw_pages(Path(d), book)))
-    keys = sorted(set().union(*(m.keys() for _, m in maps)))
-    rows = []
-    for k in keys:
-        row = {"book": k[0], "page": k[1] + 1}
-        for name, m in maps:
-            row[name] = m.get(k, {}).get("text", "")[:cfg.preview_chars]
-        rows.append(row)
-    _rows_table(rows, "OCR comparison")

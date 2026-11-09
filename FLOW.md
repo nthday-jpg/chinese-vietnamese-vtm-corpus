@@ -1,33 +1,28 @@
 # Flow thực hiện
 
-> Logic nằm trong `src/vtm_corpus/`; notebook chỉ giữ cấu hình và gọi package.
+> Notebook 3 chứa trực tiếp các hàm setup, điều phối và so sánh; chỉ worker OCR chạy ở file riêng.
+> `src/vtm_corpus/` vẫn dùng cho CLI/local và làm nguồn cập nhật notebook. Notebook 2 dùng package như trước.
 > Output của mỗi lần chạy nằm trong `work/runs/ocr_*/` hoặc `work/runs/dich_*/`
 > (trên Kaggle là `/kaggle/working/runs/...`), không ghi đè lẫn nhau.
 
 ```
 PDF scan ─► ảnh từng trang ─► OCR ─► làm sạch ─► txt chữ Hán ─► chia đoạn ─► LLM dịch ─► ghép ─► txt tiếng Việt
-            └──────────────── Bước 1: 1_ocr_*.ipynb ────────────────┘   └────── Bước 2: 2_dich_han_viet.ipynb ──────┘
+            └──── Bước 1: 3_so_sanh_so_chu_ocr.ipynb ──────────────┘   └────── Bước 2: 2_dich_han_viet.ipynb ──────┘
 ```
 
 ## Bước 1 — OCR (PDF scan → txt chữ Hán)
 
 1. **Tìm PDF:** lấy file `.pdf` trong Input; mỗi PDF là 1 cuốn, tên file là tên sách.
-   `books=[]` chạy tất cả; `books=["tên", "*glob*"]` chỉ chạy tập con (xem `vtm list`).
-2. **Chia việc:** các trang được chia xen kẽ cho 2 GPU, mỗi GPU chạy 1 bản model.
+   `BOOKS=[]` chọn tất cả; `BOOKS=["tên", "*glob*"]` chỉ chọn tập con (xem `vtm list`).
+2. **Chọn tập trang chung:** `BOOKS`, `MAX_BOOKS`, `PAGES`, `LIMIT` áp dụng cho cả bốn model; mặc định hai trang của một PDF.
 3. **Render:** mỗi trang PDF được vẽ thành ảnh ở `DPI`, thu nhỏ để cạnh dài không quá `MAX_SIDE`.
-4. **OCR:**
-   - *HunyuanOCR* là model end-to-end: nhận cả trang và 1 prompt, trả về text dạng markdown theo thứ tự đọc,
-     bỏ đầu trang/chân trang. Không có bước layout riêng.
-   - *PaddleOCR-VL* chạy 2 bước: model layout khoanh các vùng (tiêu đề, đoạn văn, bảng, hình, số trang…) và xếp thứ tự
-     đọc, rồi model VL đọc chữ từng vùng. Các vùng đầu trang, chân trang, số trang, chú thích, hình bị bỏ.
-   - Ô **Layout detection** vẽ các vùng lên vài trang mẫu. Với Paddle đó là các vùng nó thật sự dùng để đọc; với
-     Hunyuan là một lượt hỏi riêng (prompt *版式分析*) chỉ để xem, lượt OCR chính không dùng.
+4. **OCR:** PP-OCRv6-medium, TongGuOCR, PaddleOCR-VL-1.6 và HunyuanOCR-1.5 chạy lần lượt trong tiến trình riêng; model được giải phóng sau mỗi stage.
 5. **Làm sạch:** cắt đoạn lặp vô hạn ở cuối (lỗi hay gặp của model sinh chữ), bỏ ký hiệu markdown/HTML, bảng thành
    dòng chữ.
-6. **Ghi file:** text các trang được nối theo thứ tự trang thành `runs/ocr_*/txt/<tên sách>.txt`, giữa 2 trang có 1 dòng trống.
+6. **Ghi file:** mỗi model lưu checkpoint và `.txt` theo sách; đường dẫn nằm trong manifest campaign.
+7. **So sánh và rà soát:** căn chỉnh ký tự, đếm phiếu/entropy, hiển thị bốn dự đoán và crop chữ bất đồng khi có tọa độ đáng tin cậy. Chọn bản `.txt` đã rà soát làm đầu vào notebook 2; không tự chuyển chữ còn tranh chấp sang dịch.
 
-Mỗi trang xong là được lưu ngay. Trang chạy quá 5 phút thì bị bỏ qua; 15 phút không có tiến triển thì model được
-khởi động lại và bỏ trang đang kẹt.
+Mỗi trang xong được lưu ngay. Timeout và số lần khởi động lại theo cấu hình; chạy lại cùng checkpoint sẽ bỏ qua trang đã xong. Notebook 3 chuẩn bị packages offline trước OCR; notebook 2 giữ workflow dịch hiện tại.
 
 ## Bước 2 — Dịch (txt chữ Hán → txt tiếng Việt)
 

@@ -14,7 +14,6 @@ from .pipeline import (
 )
 from .report import (
     ocr_summary,
-    show_compare,
     show_layouts,
     show_ocr_report,
     show_pages,
@@ -28,5 +27,5 @@ __all__ = [
     "RunResult", "run_ocr", "run_translate", "export_ocr", "export_translate",
     "find_run", "list_pdfs", "list_texts", "select_entries",
     "ocr_summary", "translate_summary", "show_ocr_report", "show_translate_report",
-    "show_layouts", "show_pages", "show_translation_pairs", "show_compare",
+    "show_layouts", "show_pages", "show_translation_pairs",
 ]

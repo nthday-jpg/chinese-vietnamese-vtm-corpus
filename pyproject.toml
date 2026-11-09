@@ -29,10 +29,9 @@ translate = [
 ]
 paddle-gpu = [
   "paddlepaddle-gpu==3.2.1",
-  "paddleocr[doc-parser]",
+  "paddleocr[doc-parser]>=3.7",
 ]
 report = ["pandas"]
-eval = ["pandas", "jiwer", "sacrebleu", "opencc"]
 notebook = ["ipykernel>=6.29.5", "ipywidgets>=8"]
 
 # Use the official CUDA 12.6 wheels for a shared NVIDIA GPU environment.

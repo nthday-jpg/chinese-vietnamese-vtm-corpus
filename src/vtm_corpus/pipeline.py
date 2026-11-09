@@ -352,8 +352,12 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--tasks", str(tasks), "--out", str(raw_dir),
         "--shard", str(shard), "--nshard", str(nshard),
         "--dpi", str(cfg.dpi), "--max-side", str(cfg.max_side),
+        "--image-config", json.dumps({key: getattr(cfg, key) for key in (
+            "segmentation", "reading_direction", "segmentation_args", "region_max_pixels",
+            "region_max_side", "region_upscale", "resolution_strict")}),
         "--max-new", str(cfg.max_new_tokens), "--dtype", cfg.dtype,
-        "--model", cfg.model, "--prompt", cfg.prompt,
+        "--model", cfg.model, "--model-revision", cfg.model_revision, "--prompt", cfg.prompt,
+        "--tonggu-repo", cfg.tonggu_repo, "--tonggu-config", cfg.tonggu_config,
         "--rep-penalty", str(cfg.repetition_penalty),
         "--device", cfg.device,
         "--paddle-version", cfg.paddle_version,
@@ -361,10 +365,13 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--page-timeout", str(cfg.page_timeout),
         *extra,
     ]
+    for key in ("model_min_pixels", "model_max_pixels"):
+        if getattr(cfg, key) is not None:
+            cmd.extend(["--" + key.replace("_", "-"), str(getattr(cfg, key))])
     env = os.environ.copy()
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONPATH"] = _src_dir() + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join([_src_dir(), *cfg.worker_pythonpath, env.get("PYTHONPATH", "")])
     if cfg.device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
     else:

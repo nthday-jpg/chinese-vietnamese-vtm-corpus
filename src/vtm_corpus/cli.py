@@ -13,7 +13,7 @@ import dataclasses
 import json
 from pathlib import Path
 
-from .config import OCRConfig, ReportConfig, TranslateConfig
+from .config import OCRConfig, TranslateConfig
 from .pipeline import find_run, list_pdfs, list_texts, run_ocr, run_translate
 from .report import show_layouts, show_ocr_report, show_pages, show_translate_report
 

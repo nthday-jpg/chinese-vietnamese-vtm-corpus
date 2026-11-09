@@ -39,7 +39,7 @@ def config_hash(cfg: Any, exclude: set[str]) -> str:
 class OCRConfig:
     """Cấu hình bước OCR. Mọi trường đều có thể sửa từ notebook."""
 
-    engine: str = "hunyuan"                 # hunyuan | paddle | dummy
+    engine: str = "hunyuan"                 # hunyuan | paddle | ppocr | tonggu | dummy
     input_dir: str = "data"                 # thư mục chứa PDF (glob đệ quy)
     books: list[str] = field(default_factory=list)  # [] = tất cả; tên hoặc glob, vd ["*ky_huyet*"]
     workdir: str = "work"                   # thư mục gốc chứa runs/
@@ -47,18 +47,32 @@ class OCRConfig:
     pages: str = ""                         # "" = cả sách; "1-10,15" = các trang chỉ định
     dpi: int = 200
     max_side: int = 1280
+    segmentation: str = "none"              # none | auto | columns; auto keeps native layout engines
+    reading_direction: str = "vertical_rtl" # vertical_rtl | horizontal_ltr
+    segmentation_args: dict = field(default_factory=dict)
+    region_max_pixels: int = 0              # 0 = engine budget when segmentation is enabled
+    region_max_side: int = 0                # 0 = no additional side cap
+    region_upscale: float = 1.0             # explicit interpolation only; never restores detail
+    resolution_strict: bool = False         # fail rather than downsample an unsplittable region
+    model_min_pixels: int | None = None     # None keeps the installed processor's setting
+    model_max_pixels: int | None = None
     max_new_tokens: int = 4096
     dtype: str = "fp16"                     # fp32 | fp16 | bf16 (hunyuan)
     model: str = "tencent/HunyuanOCR"
+    model_revision: str = ""               # HF revision/commit; included in cache identity
     prompt: str = ""                        # "" = HUNYUAN_PROMPT
     repetition_penalty: float = 1.08
     device: str = "auto"                    # auto | cpu | cuda | cuda:1
     paddle_version: str = "v1.6"            # v1.6 | v1.5
     paddle_args: dict = field(default_factory=dict)
+    tonggu_repo: str = ""                   # checkout with TongGuOCR + layout/OCR weights
+    tonggu_config: str = ""                 # optional upstream YAML/JSON config
     limit: int | None = None                # giới hạn tổng số trang (chạy thử)
     page_timeout: int = 300                 # giây/trang
     n_gpu: int = 0                          # 0 = tự phát hiện
     worker_python: str = ""                 # "" = sys.executable; Paddle local có thể là venv
+    worker_wsl_distro: str = ""             # Windows: execute worker in this WSL distro
+    worker_pythonpath: list[str] = field(default_factory=list)  # extra import roots, e.g. offline PDFium
     budget_h: float = 10.5
     stall_min: int = 15
     max_restarts: int = 5
@@ -70,17 +84,30 @@ class OCRConfig:
     resume_from: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.engine not in ("hunyuan", "paddle", "dummy"):
+        if self.engine not in ("hunyuan", "paddle", "ppocr", "tonggu", "dummy"):
             raise ValueError(f"engine không hợp lệ: {self.engine}")
         if self.dtype not in ("fp32", "fp16", "bf16"):
             raise ValueError(f"dtype không hợp lệ: {self.dtype}")
         if self.dpi <= 0 or self.max_side <= 0 or self.max_new_tokens <= 0:
             raise ValueError("dpi, max_side, max_new_tokens phải > 0")
+        if self.segmentation not in {"none", "auto", "columns"}:
+            raise ValueError("segmentation must be none, auto or columns")
+        if self.reading_direction not in {"vertical_rtl", "horizontal_ltr"}:
+            raise ValueError("reading_direction must be vertical_rtl or horizontal_ltr")
+        if self.region_max_pixels < 0 or self.region_max_side < 0 or not 1 <= self.region_upscale <= 4:
+            raise ValueError("region caps must be >= 0; region_upscale must be in [1, 4]")
+        if any(v is not None and v <= 0 for v in (self.model_min_pixels, self.model_max_pixels)):
+            raise ValueError("model pixel budgets must be positive or None")
+        if (self.model_min_pixels is not None and self.model_max_pixels is not None
+                and self.model_min_pixels > self.model_max_pixels):
+            raise ValueError("model_min_pixels must not exceed model_max_pixels")
+        if not isinstance(self.segmentation_args, dict):
+            raise ValueError("segmentation_args must be a dictionary")
 
     def cache_key(self) -> str:
         return config_hash(self, {
             "input_dir", "workdir", "run_name", "limit", "page_timeout", "n_gpu",
-            "worker_python", "budget_h", "stall_min", "max_restarts", "n_layout",
+            "worker_python", "worker_wsl_distro", "worker_pythonpath", "budget_h", "stall_min", "max_restarts", "n_layout",
             "layout_budget_h", "export", "fresh", "resume_from",
         })
 
