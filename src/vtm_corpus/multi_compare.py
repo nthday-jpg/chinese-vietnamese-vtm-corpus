@@ -8,10 +8,11 @@ from .character_regions import attach_character_regions, attach_conflict_regions
 from .ocr_records import read_json, load_run, check_sources
 from .multi_consensus import multi_character_consensus
 from .ocr_quality import page_quality_issues
+from .page_consensus import page_level_consensus, page_consensus_exclusions, page_consensus_summary
 
 
 def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review_threshold=.05,
-                         reading_order="auto") -> dict:
+                         reading_order="auto", page_consensus=True, page_consensus_options=None) -> dict:
     if not 0 <= review_threshold <= 1:
         raise ValueError("review_threshold must be between 0 and 1")
     if reading_order not in {"auto", "vertical_rtl", "detection"}:
@@ -37,6 +38,12 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
                        for name, run in runs.items()}
             candidates = {name: r["text"] if r is not None else None for name, r in records.items()}
             quality = page_quality_issues(records)
+            page_diagnostic = (page_level_consensus(records, excluded_models=quality,
+                source_verified=bool(verified.get(book)), options=page_consensus_options)
+                if page_consensus else None)
+            if page_diagnostic:
+                for name,issues in page_consensus_exclusions(page_diagnostic).items():
+                    quality[name] = sorted(set(quality.get(name, [])+issues))
             locator = records.get("ppocr")
             reference_lines = ([line["text"] for line in locator["geometry"].get("text_lines", [])]
                                if locator and locator["reading_order"]["mode"] == "vertical_rtl" and "ppocr" not in quality else None)
@@ -46,6 +53,12 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
             attach_conflict_regions(consensus, records)
             source = first["manifest"].get("books", {}).get(book, {}).get("src")
             reasons = []
+            if page_diagnostic and page_diagnostic['findings']:
+                reasons.append("page_structure_disagreement")
+            if page_diagnostic and not page_diagnostic['complete']:
+                reasons.append("page_structure_analysis_limit")
+            if page_diagnostic and page_diagnostic['status'] == 'unresolved_structure':
+                reasons.append("page_structure_unresolved")
             if consensus["missing_models"]:
                 reasons.append("missing_models")
             if quality:
@@ -69,6 +82,7 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
             severe = any(r != "character_conflicts" for r in reasons)
             rows.append({"book": book, "page": page + 1, "source": source,
                          "source_verified": bool(verified.get(book)), "consensus": consensus,
+                         "page_consensus": page_diagnostic,
                          "route": "review_page" if severe else "review_characters" if reasons else "agreement_only",
                          "reasons": reasons,
                          "quality_issues": quality,
@@ -83,6 +97,7 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
             "corpus_manifest": str(Path(manifest_path).resolve()), "manifests": configs,
             "settings": {"mode": "visible", "locator": "ppocr", "review_threshold": review_threshold,
                          "max_alignment_cells": max_alignment_cells, "reading_order": reading_order,
+                         "page_consensus": bool(page_consensus), "page_consensus_options": page_consensus_options or {},
                          "quality_policy": "flag_and_abstain", "vote_rule": "strict_majority_all_models"}}
 
 
@@ -96,6 +111,9 @@ def multi_tables(result):
                       "Bất đồng": len(c["conflicts"]),
                       "Đã định vị": sum(x["localization"] is not None for x in c["conflicts"]),
                       "Entropy (bit)": c["mean_entropy_bits"], "Lý do": ", ".join(row["reasons"])})
+        diagnostic = row.get("page_consensus") or {}
+        pages[-1]["Cấu trúc trang"] = diagnostic.get("status", "not_assessed")
+        pages[-1]["Dấu hiệu cấp trang"] = page_consensus_summary(diagnostic)
         pages[-1]["Không bỏ phiếu"] = "; ".join(f"{name}: {', '.join(issues)}" for name, issues in c.get("excluded_models", {}).items())
         for conflict in c["conflicts"]:
             conflicts.append({"Sách": row["book"], "Trang": row["page"], "Cột": conflict["index"],
@@ -119,6 +137,14 @@ def show_character_conflicts(result, book, page, *, max_characters=20, dpi=250, 
     row = next((r for r in result["rows"] if r["book"] == book and r["page"] == page), None)
     if row is None:
         raise ValueError("Book/page not in selected campaign")
+    diagnostic = row.get("page_consensus")
+    if diagnostic:
+        print("Đồng thuận cấp trang:", diagnostic['status'])
+        for finding in diagnostic['findings']:
+            print(f"{finding['model']}: {finding['label']}; vùng {finding['region_ids']}; "
+                  f"đối chứng {finding['supporters']}; stream={finding['stream']}.")
+        if diagnostic['findings']:
+            print("Đây là dấu hiệu từ các mốc văn bản; vùng ảnh chỉ được xác nhận khi có tọa độ model.")
     _, table = multi_tables({**result, "rows": [row]})
     display(table.head(max_characters))
     if not row["consensus"]["conflicts"]:

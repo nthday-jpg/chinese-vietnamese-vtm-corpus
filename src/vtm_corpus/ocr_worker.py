@@ -19,6 +19,7 @@ from pathlib import Path
 from .config import HUNYUAN_PROMPT, OCRConfig
 from .ocr_quality import ocr_quality_issues
 from .image_preparation import run_prepared_page
+from .image_dataset import dataset_ocr_page, dataset_file_hash
 
 PADDLE_IGNORE = {"header", "header_image", "footer", "footer_image", "number", "footnote", "aside_text",
                  "image", "chart", "seal"}
@@ -470,7 +471,8 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     engine = ENGINES[a.engine](a)
-    engine.preserve_input_resolution = image_cfg.segmentation != "none"
+    engine.preserve_input_resolution = image_cfg.segmentation != "none" or bool(image_cfg.image_dataset)
+    prepared_source_hashes = {}
     tmp = Path(tempfile.mkdtemp()) / "page.png"
 
     t_start = time.time()
@@ -488,11 +490,21 @@ def main(argv: list[str] | None = None) -> None:
 
         try:
             with page_deadline(a.page_timeout, hard_timeout):
-                img = render(t["src"], page, a.dpi, a.max_side)
-                img.save(tmp)
-                text, extra = run_prepared_page(engine, img, tmp, image_cfg, page=page)
+                prepared = None
+                if image_cfg.image_dataset:
+                    if t["src"] not in prepared_source_hashes:
+                        prepared_source_hashes[t["src"]] = dataset_file_hash(t["src"])
+                    prepared = dataset_ocr_page(image_cfg, prepared_source_hashes[t["src"]], page)
+                if prepared is None:
+                    img = render(t["src"], page, a.dpi, a.max_side)
+                    img.save(tmp)
+                    input_path = tmp
+                else:
+                    img, input_path = prepared
+                text, extra = run_prepared_page(engine, img, input_path, image_cfg, page=page)
             rec = {"page": page, "text": text, "w": img.width, "h": img.height,
-                   "sec": round(time.time() - t0, 1), **extra}
+                   "sec": round(time.time() - t0, 1), **extra,
+                   "image_input": "prepared" if prepared else "legacy_missing_page_fallback" if image_cfg.image_dataset else "legacy"}
             with open(result_file(out, book, name, a.shard), "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             eta = (time.time() - t_start) / n * (len(todo) - n) / 60

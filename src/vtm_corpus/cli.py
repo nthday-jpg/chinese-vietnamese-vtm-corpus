@@ -47,6 +47,9 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="vtm", description="Vietnamese Traditional Medicine corpus pipeline")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    from .image_dataset import add_image_dataset_commands, run_image_dataset_command
+    add_image_dataset_commands(sub.add_parser("images",help="offline versioned image dataset; no OCR weights"))
+
     p = sub.add_parser("ocr", help="OCR PDF -> txt chữ Hán")
     _common(p)
 
@@ -71,7 +74,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workdir", default="work")
 
     a = ap.parse_args(argv)
-    if a.cmd == "ocr":
+    if a.cmd == "images":
+        run_image_dataset_command(a)
+    elif a.cmd == "ocr":
         cfg = _apply(OCRConfig, a.config, a.set)
         try:
             res = run_ocr(cfg)

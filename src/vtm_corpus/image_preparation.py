@@ -21,15 +21,20 @@ def image_budget(cfg):
     return pixels, cfg.region_max_side
 
 
-def projection_gaps(image, axis, options):
-    """Find internal low-ink gutters; suppress long rules in analysis only."""
+def projection_mask(image, options):
+    """Analysis-only ink mask; never use these pixels for canonical/OCR crops."""
     from PIL import Image, ImageChops, ImageFilter, ImageOps
     gray = image.convert("L")
     gray.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
     # Local background subtraction also works on dark/uneven manuscript paper.
     radius = max(2, min(gray.size) / 80)
     mask = ImageChops.subtract(gray.filter(ImageFilter.GaussianBlur(radius)), gray)
-    mask = ImageOps.autocontrast(mask).point(lambda v: 255 if v > options.get("ink_threshold", 40) else 0)
+    return ImageOps.autocontrast(mask).point(lambda v: 255 if v > options.get("ink_threshold", 40) else 0)
+
+
+def projection_gaps(image, axis, options):
+    """Find internal low-ink gutters; suppress long rules in analysis only."""
+    mask = projection_mask(image, options)
     w, h = mask.size
     data = mask.tobytes()
     # Exclude outer 3% and dense ruling rows/columns from the projection only.
@@ -219,7 +224,7 @@ def _page_geometry(extra, box, input_size, offset, region_index):
 def run_prepared_page(backend, image, image_path, cfg, *, page=0):
     """Run all regions transactionally; partial region text never becomes a page."""
     import tempfile
-    if cfg.segmentation == "none":
+    if cfg.segmentation == "none" and not image.info.get("prepared_dataset"):
         return backend.run(str(image_path))
     # The shared render cache remains immutable while inference reads crops.
     with tempfile.TemporaryDirectory(prefix="vtm-regions-") as directory:
@@ -229,15 +234,37 @@ def run_prepared_page(backend, image, image_path, cfg, *, page=0):
 def _run_prepared_regions(backend, image, cfg, *, page, directory):
     from .text_alignment import comparison_text
     from .reading_order import order_ppocr_columns
-    boxes, layout = plan_regions(image, cfg, page=page)
+    prepared = image.info.get("prepared_dataset")
+    if prepared:
+        boxes = [tuple(r["source_box"]) for r in prepared["regions"]]
+        layout = {**prepared["layout"], "warnings": list(prepared["layout"]["warnings"]),
+                  "method": "prepared_"+prepared["crop_type"]}
+    else:
+        boxes, layout = plan_regions(image, cfg, page=page)
     if image.info.get("render", {}).get("downsampled"):
         layout["warnings"].append("page_render_downsampled_before_segmentation; raise max_side")
         if cfg.resolution_strict:
             raise ValueError("Page render was downsampled before segmentation; raise max_side")
     records, texts, merged, offset = [], [], {}, 0
-    native = layout["method"] == "native_layout"
+    native = (prepared["crop_type"] == "native" and cfg.engine in {"paddle", "tonggu"}
+              if prepared else layout["method"] == "native_layout")
     for i, box in enumerate(boxes):
-        crop, meta = prepare_region(image, box, cfg, native=native)
+        if prepared:
+            from .image_dataset import dataset_load_image
+            entry = prepared["regions"][i]["images"][prepared["variant"]]
+            variant = dataset_load_image(prepared["root"], entry)
+            crop, meta = prepare_region(variant, (0,0,variant.width,variant.height), cfg, native=native)
+            meta.update(variant_scale_xy=meta["scale_xy"], variant_downsampled=meta.get("downsampled",False),
+                        resized_from_variant=meta["resized"])
+            meta.update(crop_size=[box[2]-box[0],box[3]-box[1]],variant_size=list(variant.size),
+                        scale_xy=[crop.width/(box[2]-box[0]),crop.height/(box[3]-box[1])],
+                        downsampled=crop.width < box[2]-box[0] or crop.height < box[3]-box[1],
+                        resized=crop.size != (box[2]-box[0],box[3]-box[1]),
+                        variant=prepared["variant"],variant_sha256=entry["sha256"],
+                        operation=entry["operation"],canonical_region_id=prepared["regions"][i]["id"],
+                        input_to_source=[(box[2]-box[0])/crop.width,0,0,(box[3]-box[1])/crop.height,box[0],box[1]])
+        else:
+            crop, meta = prepare_region(image, box, cfg, native=native)
         path = directory / f"region_{i:03d}.png"
         crop.save(path, format="PNG")
         try:
@@ -275,10 +302,14 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
     hit_max = True if any(v is True for v in hit_flags) else (None if any(v is None for v in hit_flags) else False)
     if any(rec.get("downsampled") for rec in records):
         layout["warnings"].append("backend_input_downsampled; inspect regions or enable resolution_strict")
+    if any(rec.get("variant_downsampled") for rec in records):
+        layout["warnings"].append("backend_variant_downsampled; inspect selected variant and input budget")
     observation = {"page_size": list(image.size), "render": image.info.get("render", {}),
                    "layout": layout, "regions": records,
                    "model_min_pixels": cfg.model_min_pixels, "model_max_pixels": cfg.model_max_pixels,
                    "processor_observation": "see region raw.model_input; native internal tensors may be unavailable"}
+    if prepared:
+        observation["dataset"] = {k:prepared[k] for k in ("snapshot_id","source_sha256","source","variant","crop_type","acquisition")}
     return "\n".join(texts), {**merged, "hit_max": hit_max, "quality_issues": issues,
         "coordinate_frame": "input_image", "image_preparation": observation,
         "reading_direction": cfg.reading_direction, "region_order_applied": True}

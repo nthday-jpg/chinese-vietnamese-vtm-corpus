@@ -19,6 +19,7 @@ from .config import OCRConfig, load_ocr_config
 from .ocr_worker import load_results
 from .pipeline import _run_dir, list_pdfs, parse_pages, select_entries
 from .worker_paths import to_wsl_path
+from .image_dataset import bind_image_dataset
 
 
 def now() -> str:
@@ -142,6 +143,9 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                     setattr(cfg, identity, getattr(base, identity))
                 cfg.input_dir, cfg.workdir = str(Path(base.input_dir).resolve()), str(workdir)
                 cfg.limit, cfg.n_layout, cfg.fresh, cfg.resume_from = base.limit, 0, False, []
+                # Prepared content/variant identity must be bound before any
+                # prior run/checkpoint is considered reusable.
+                bind_image_dataset(cfg, source_sha, pages)
                 signature = (cfg.model, cfg.model_revision, cfg.dtype, cfg.device, cfg.paddle_version,
                              json.dumps(cfg.paddle_args, sort_keys=True), cfg.tonggu_repo, cfg.tonggu_config)
                 if cfg.engine in startup and signature != startup[cfg.engine]:

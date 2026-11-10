@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from html import escape as report_escape
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from .character_regions import character_crops
 from .corpus_ocr import now, write_json
 from .ocr_records import load_run, read_jsonl
 from .ocr_worker import render
+from .page_consensus import page_consensus_summary, page_structure_overview
 
 
 BOOK_OUTPUT_FORMAT = 'vtm-ocr-book-v1'
@@ -78,6 +80,43 @@ def book_html(title, body, *, page=False):
 
 def book_prediction(value):
     return 'chưa có output' if value is None else value or '∅'
+
+
+def book_page_consensus(diagnostic):
+    """Portable text/coordinate evidence; missing geometry stays unresolved."""
+    if not diagnostic:
+        return ''
+    html = '<section><h2>Đồng thuận cấp trang</h2><p>' + report_escape(diagnostic['status']) + '</p>'
+    html += '<p class="muted">Dấu hiệu đối chiếu giữa model; chưa chứng minh cột thật bị thiếu, lặp hoặc văn bản là bịa. Đa số có thể cùng sai.</p>'
+    if diagnostic.get('overview'):
+        html += '<figure><img loading="lazy" src="../'+report_escape(diagnostic['overview'],quote=True)+'" alt="Ngữ cảnh các vùng có dấu hiệu bất đồng cấp trang"><figcaption>Khung đỏ là vùng ngữ cảnh do model ước lượng; số khung trùng số vùng bên dưới. Vùng chỉ có mốc chữ không được vẽ khung.</figcaption></figure>'
+    findings = diagnostic['findings']
+    if findings:
+        html += '<div class="scroll"><table><thead><tr><th>Model</th><th>Dấu hiệu</th><th>Vùng</th><th>Đối chứng</th><th>Luồng văn bản</th></tr></thead><tbody>'
+        for item in findings:
+            stream = ('Output gốc, đã chuẩn hóa trước so ký tự' if item.get('corrected_before_character_consensus')
+                      else 'Văn bản đưa vào đối chiếu')
+            html += '<tr>' + ''.join('<td>'+report_escape(value)+'</td>' for value in (
+                item['model'],item['label'],', '.join(map(str,item['region_ids'])),', '.join(item['supporters']),stream)) + '</tr>'
+        html += '</tbody></table></div>'
+    else:
+        html += '<p>Chưa phát hiện bất đồng cấu trúc với bằng chứng hiện có; không có nghĩa OCR đã đầy đủ hoặc đúng.</p>'
+    selected = {number for item in findings for number in item['region_ids']}
+    for region in diagnostic['regions']:
+        if region['id'] not in selected:
+            continue
+        html += f'<details class="card"><summary>Vùng {region["id"]} · mốc từ {report_escape(region["reference_model"])}</summary>'
+        html += '<pre>'+report_escape(region['text'])+'</pre>'
+        if region['location']:
+            html += '<p class="muted">Khung ngữ cảnh do model ước lượng (tọa độ chuẩn hóa 0–1): ' + report_escape(str(region['location']['bbox'])) + '. Khung không xác nhận cùng vị trí ảnh giữa các model.</p>'
+        else:
+            html += '<p class="muted">Chưa định vị trên ảnh; đây là vùng theo mốc văn bản.</p>'
+        html += '<ul>'
+        for name,match in region['models'].items():
+            spans = [m['span'] for m in match['matches']]
+            html += '<li>'+report_escape(f'{name}: {match["status"]}; số lần khớp={match.get("copies", "chưa rõ")}; offsets={spans}')+'</li>'
+        html += '</ul><p class="muted">Offsets đếm từ 0 trong chuỗi bỏ khoảng trắng; không phải tọa độ ảnh.</p></details>'
+    return html+'</section>'
 
 
 def book_save_crop(root, relative, image, generated):
@@ -161,7 +200,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     book_write_text(directory, 'style.css', BOOK_CSS, generated)
     book_write_text(directory, 'reader.js', BOOK_JS, generated)
     comparisons, index_rows = [], []
-    render_count = crop_count = 0
+    render_count = crop_count = structural_overviews = 0
     for position, row in enumerate(rows):
         page, consensus = row['page'], row['consensus']
         records = {model: runs[model]['records'].get((book, page - 1)) for model in models}
@@ -184,8 +223,22 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             notice = ('<p class="notice">Không bỏ phiếu; cần kiểm tra output: ' + report_escape(', '.join(quality)) + '</p>') if quality else ''
             panels.append(f'<article class="panel" id="model-{safe_model}"{ " hidden" if index else ""}><h3>{safe_model}</h3>{notice}<pre>{report_escape(text)}</pre></article>')
         body += '<section><h2>Văn bản OCR</h2><div class="tabs" role="tablist">' + ''.join(tabs) + '</div>' + ''.join(panels) + '</section>'
+        diagnostic = deepcopy(row.get('page_consensus'))
+        image = None
+        if diagnostic and include_crops and row['source_verified'] and row['source'] and Path(row['source']).is_file():
+            numbers = {n for item in diagnostic['findings'] for n in item['region_ids']}
+            if any(r['id'] in numbers and r['location'] for r in diagnostic['regions']):
+                image = (renderer or render)(row['source'],page-1,dpi,100_000)
+                render_count += 1
+                overview = page_structure_overview(image,diagnostic)
+                filename = f'crops/p{page:05d}/page_structure.png'
+                book_save_crop(directory,filename,overview,generated)
+                overview.close()
+                diagnostic['overview'] = filename
+                structural_overviews += 1
+        body += book_page_consensus(diagnostic)
         body += '<section><h2>Vùng bất đồng</h2>'
-        image, regions = None, []
+        regions = []
         for region in consensus.get('conflict_regions', []):
             region = dict(region)
             number = region['number']
@@ -230,11 +283,13 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         comparisons.append(json.dumps({'page': page, 'status': consensus['status'], 'source_verified': row['source_verified'],
             'reasons': row['reasons'], 'missing_models': consensus['missing_models'], 'reference': consensus['reference'],
             'excluded_models': consensus.get('excluded_models', {}), 'reading_order': row.get('reading_order', {}),
+            'page_consensus': diagnostic,
             'alignment': consensus.get('alignment'), 'line_alignment': consensus.get('line_alignment', {}),
             'pairwise_distances': consensus['pairwise_distances'], 'conflicts': consensus['conflicts'],
             'regions': regions}, ensure_ascii=False))
         cells = ''.join(f'<td><span class="badge{ " bad" if not records[model] or model in consensus.get("excluded_models", {}) else ""}">{"Không bỏ phiếu" if model in consensus.get("excluded_models", {}) else "OK" if records[model] else "Thiếu"}</span></td>' for model in models)
-        index_rows.append(f'<tr data-page="{page}"><td><a href="pages/p{page:05d}.html">Trang {page}</a></td>{cells}<td>{len(consensus["conflicts"])}</td></tr>')
+        structural = page_consensus_summary(row.get('page_consensus') or {})
+        index_rows.append(f'<tr data-page="{page}"><td><a href="pages/p{page:05d}.html">Trang {page}</a></td>{cells}<td>{len(consensus["conflicts"])}</td><td>{report_escape(structural)}</td></tr>')
     book_write_text(directory, 'comparison.jsonl', '\n'.join(comparisons) + '\n', generated)
     counts = {model: sum((book, row['page'] - 1) in runs[model]['records'] for row in rows) for model in models}
     complete = all(count == len(rows) for count in counts.values())
@@ -249,7 +304,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     if all_warnings:
         body += '<section class="notice"><h2>Lưu ý dữ liệu</h2><ul>' + ''.join('<li>' + report_escape(value) + '</li>' for value in all_warnings) + '</ul></section>'
     body += '<section><h2>Các trang</h2><label>Lọc trang / trạng thái <input id="page-filter" type="search" placeholder="Ví dụ: Trang 12 hoặc Thiếu"></label>'
-    body += '<div class="scroll"><table><thead><tr><th>Trang</th>' + ''.join(f'<th>{report_escape(model)}</th>' for model in models) + '<th>Bất đồng</th></tr></thead><tbody>'
+    body += '<div class="scroll"><table><thead><tr><th>Trang</th>' + ''.join(f'<th>{report_escape(model)}</th>' for model in models) + '<th>Bất đồng</th><th>Dấu hiệu cấp trang</th></tr></thead><tbody>'
     body += ''.join(index_rows) + '</tbody></table></div></section>'
     body += '<section><h2>Dữ liệu và nhật ký</h2><ul>' + ''.join(f'<li><a href="raw/{model}.jsonl">{model}.jsonl</a> · {counts[model]}/{len(rows)} trang</li>' for model in models)
     body += '<li><a href="comparison.jsonl">Bất đồng và tọa độ</a></li><li><a href="errors.jsonl">Lịch sử lỗi</a></li><li><a href="manifest.json">Thông tin nguồn và cấu hình</a></li></ul></section>'
@@ -262,6 +317,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         'models': {model: {'done': counts[model], 'selected': len(rows), 'config': runs[model]['manifest']['config'],
                     'source': runs[model]['manifest'].get('books', {}).get(book)} for model in models},
         'warnings': all_warnings, 'crop_regions': crop_count, 'pages_rendered_for_crops': render_count,
+        'page_structure_overviews': structural_overviews,
         'quality_review_pages': quality_pages, 'comparison_settings': result.get('settings', {}),
         'crop_dpi': dpi, 'generated_files': sorted(generated),
         'export_seconds': round(time.monotonic() - started, 3)}

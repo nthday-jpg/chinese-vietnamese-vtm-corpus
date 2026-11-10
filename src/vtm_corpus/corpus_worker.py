@@ -20,6 +20,7 @@ from .corpus_ocr import now, write_json
 from .pipeline import export_ocr
 from .worker_paths import runtime_path
 from .image_preparation import run_prepared_page
+from .image_dataset import dataset_ocr_page
 
 
 def create_engine(engine: str, cfg: OCRConfig):
@@ -88,6 +89,11 @@ def corpus_page_image(campaign, manifest, book, task, cfg, render, temporary):
     """Share lossless renders across models; a damaged cache is rendered again."""
     from PIL import Image
     source_sha = manifest.get('books', {}).get(book, {}).get('sha256')
+    if cfg.image_dataset:
+        prepared = dataset_ocr_page(cfg, source_sha, task['page'])
+        if prepared is not None:
+            image, path = prepared
+            return image, path, True
     key = {'source_sha256': source_sha, 'page': task['page'], 'dpi': cfg.dpi, 'max_side': cfg.max_side,
            'renderer': 'pdfium-rgb-lanczos-v2'}
     cached = bool(campaign.get('cache_renders') and source_sha)
@@ -153,7 +159,7 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                 if backend is not None:
                     backend.max_new = cfg.max_new_tokens
                     backend.model_min_pixels, backend.model_max_pixels = cfg.model_min_pixels, cfg.model_max_pixels
-                    backend.preserve_input_resolution = cfg.segmentation != "none"
+                    backend.preserve_input_resolution = cfg.segmentation != "none" or bool(cfg.image_dataset)
                     if engine == "hunyuan":
                         backend.rep, backend.prompt = cfg.repetition_penalty, cfg.prompt or HUNYUAN_PROMPT
                 manifest.update(status="running", updated=now())
@@ -179,7 +185,9 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                         record = {"page": page, "text": text, "w": image.width, "h": image.height,
                                   "sec": round(time.monotonic() - started, 1), **extra,
                                   'render_cache_hit': cache_hit, 'render_sec': round(rendered_at - started, 3),
-                                  'inference_sec': round(time.monotonic() - rendered_at, 3)}
+                                  'inference_sec': round(time.monotonic() - rendered_at, 3),
+                                  'image_input': 'prepared' if image.info.get('prepared_dataset') else
+                                      'legacy_missing_page_fallback' if cfg.image_dataset else 'legacy'}
                         preparation = extra.get('image_preparation')
                         if preparation:
                             regions = preparation['regions']

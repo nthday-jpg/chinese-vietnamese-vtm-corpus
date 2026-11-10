@@ -354,7 +354,8 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--dpi", str(cfg.dpi), "--max-side", str(cfg.max_side),
         "--image-config", json.dumps({key: getattr(cfg, key) for key in (
             "segmentation", "reading_direction", "segmentation_args", "region_max_pixels",
-            "region_max_side", "region_upscale", "resolution_strict")}),
+            "region_max_side", "region_upscale", "resolution_strict", "image_dataset",
+            "image_dataset_key", "image_variant", "image_crop_type", "image_dataset_fallback")}),
         "--max-new", str(cfg.max_new_tokens), "--dtype", cfg.dtype,
         "--model", cfg.model, "--model-revision", cfg.model_revision, "--prompt", cfg.prompt,
         "--tonggu-repo", cfg.tonggu_repo, "--tonggu-config", cfg.tonggu_config,
@@ -501,6 +502,13 @@ def _dich_progress_count(raw_dir: Path, wanted: set[str]) -> int:
 
 
 def run_ocr(cfg: OCRConfig, *, books: dict | None = None, tasks: list[dict] | None = None) -> RunResult:
+    if cfg.image_dataset:
+        from .image_dataset import bind_image_dataset, dataset_file_hash
+        cfg = OCRConfig(**cfg.to_dict())
+        if books is None or tasks is None:
+            books, tasks = build_ocr_tasks(cfg)
+        for src, selected_pages in books.values():
+            bind_image_dataset(cfg, dataset_file_hash(src), selected_pages)
     name = cfg.run_name or cfg.engine
     run_dir = _run_dir(cfg.workdir, "ocr", name, cfg)
     if cfg.fresh and run_dir.exists():

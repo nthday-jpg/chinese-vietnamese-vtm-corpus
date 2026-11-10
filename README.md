@@ -10,7 +10,7 @@ PDF sách Hán (scan) ──► Bước 1: OCR ──► .txt chữ Hán ──�
 | `data/` | PDF sách Hán (bản scan, không lấy chữ trực tiếp được) |
 | `0_kiem_tra_moi_truong_kaggle_offline.ipynb` | Kiểm tra lại thư viện, CPU/RAM/GPU và ABI trên Kaggle; không cài package hoặc OCR |
 | `2_dich_han_viet.ipynb` | Bước 2: dịch bằng một LLM nhỏ tuỳ chọn |
-| `3_so_sanh_so_chu_ocr.ipynb` | So bốn model, căn chỉnh ký tự, xem bốn dự đoán và crop từng chữ bất đồng |
+| `3_so_sanh_so_chu_ocr.ipynb` | So bốn model, kiểm tra cấu trúc trang, căn chỉnh ký tự và xem vùng bất đồng |
 | `PROBLEM.md` | Mô tả bài toán: input / output của từng bước |
 | `FLOW.md` | Giải thích từng bước notebook làm gì + gợi ý các cách làm khác |
 
@@ -31,6 +31,7 @@ src/vtm_corpus/          # toàn bộ logic: OCR, dịch, chia việc, report, C
   ocr_records.py         # đọc checkpoint và xác minh PDF nguồn
   text_alignment.py      # căn chỉnh chuỗi ký tự
   multi_consensus.py     # phiếu và entropy của nhiều model
+  page_consensus.py      # đối chiếu vùng thiếu/lặp/dư và thứ tự đọc trước phiếu ký tự
   multi_compare.py       # tổng hợp kết quả và xem từng chữ
   character_regions.py   # tọa độ chung và crop ký tự
   cli.py                 # lệnh `vtm`
@@ -263,6 +264,15 @@ Kaggle cho 30 giờ GPU/tuần, mỗi phiên tối đa 12 giờ.
   và xuất `.txt` theo từng model/sách. Đường dẫn output được ghi trong manifest.
 - Xem bốn dự đoán và khung ký tự bất đồng trước khi chọn bản OCR đưa sang dịch.
 - Mặc định xử lý hết một PDF; dùng `PAGES="1-2"`, `LIMIT=2` để thử nhanh trước lượt dài.
+
+## Dataset ảnh dùng lại cho bốn model OCR
+
+Có thể chuẩn bị ảnh nguồn, layout và crop chuẩn thành dataset có phiên bản trước
+khi chạy notebook 3. Crop giữ pixel nguồn; model chỉ resize khi inference. Dataset
+có manifest, tọa độ, preview, QC và resume theo hash; không tự upload Kaggle.
+Xem **[hướng dẫn tiếng Việt](docs/image_dataset.md)**,
+[báo cáo rà soát](docs/image_dataset_audit.md) và
+[kết quả kiểm chứng](docs/image_dataset_validation.md).
 
 ## Bước 2 — Dịch
 - *Add Input* → *Notebooks* → chọn Output notebook 3, hoặc một dataset chứa các file `.txt` đã chọn sau rà soát OCR.
