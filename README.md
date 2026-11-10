@@ -9,6 +9,7 @@ PDF sách Hán (scan) ──► Bước 1: OCR ──► .txt chữ Hán ──�
 |---|---|
 | `data/` | PDF sách Hán (bản scan, không lấy chữ trực tiếp được) |
 | `0_kiem_tra_moi_truong_kaggle_offline.ipynb` | Kiểm tra lại thư viện, CPU/RAM/GPU và ABI trên Kaggle; không cài package hoặc OCR |
+| `1_chuan_bi_anh_ocr.ipynb` | Chuẩn bị ảnh canonical và biến thể phục hồi offline; notebook tự chứa, có kiểm thử, preview và resume |
 | `2_dich_han_viet.ipynb` | Bước 2: dịch bằng một LLM nhỏ tuỳ chọn |
 | `3_so_sanh_so_chu_ocr.ipynb` | So bốn model, kiểm tra cấu trúc trang, căn chỉnh ký tự và xem vùng bất đồng |
 | `PROBLEM.md` | Mô tả bài toán: input / output của từng bước |
@@ -266,6 +267,14 @@ Kaggle cho 30 giờ GPU/tuần, mỗi phiên tối đa 12 giờ.
 - Mặc định xử lý hết một PDF; dùng `PAGES="1-2"`, `LIMIT=2` để thử nhanh trước lượt dài.
 
 ## Dataset ảnh dùng lại cho bốn model OCR
+
+Mở [`1_chuan_bi_anh_ocr.ipynb`](1_chuan_bi_anh_ocr.ipynb) để chuẩn bị trực tiếp trên
+Kaggle offline mà không cần mã dự án hoặc chạy notebook 3 trước. Điền ba đường
+dẫn packages/models/PDF, giữ cấu hình smoke một sách/một trang rồi Run All.
+Mặc định chọn original, CLAHE, bicubic ×2/×4; NLM và neural là thí nghiệm chọn thêm.
+Giới hạn đầu vào DiffTSR/UniHIR và các runtime chưa xác minh được ghi rõ trong notebook.
+Xem [audit](docs/offline_image_notebook_audit.md) và
+[báo cáo triển khai/kiểm thử](docs/offline_image_notebook_report.md).
 
 Có thể chuẩn bị ảnh nguồn, layout và crop chuẩn thành dataset có phiên bản trước
 khi chạy notebook 3. Crop giữ pixel nguồn; model chỉ resize khi inference. Dataset
