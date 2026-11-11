@@ -15,6 +15,7 @@ from .corpus_ocr import now, write_json
 from .ocr_records import load_run, read_jsonl
 from .ocr_worker import render
 from .page_consensus import page_consensus_summary, page_structure_overview
+from .evidence_report import portable_evidence, book_spatial_coverage, book_variant_stability, EVIDENCE_JS
 
 
 BOOK_OUTPUT_FORMAT = 'vtm-ocr-book-v1'
@@ -198,7 +199,13 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             book_write_text(directory, f'logs/{model}.log', log.read_text(encoding='utf-8', errors='replace'), generated)
     book_write_text(directory, 'errors.jsonl', ''.join(json.dumps(error, ensure_ascii=False) + '\n' for error in errors), generated)
     book_write_text(directory, 'style.css', BOOK_CSS, generated)
-    book_write_text(directory, 'reader.js', BOOK_JS, generated)
+    book_write_text(directory, 'reader.js', BOOK_JS + (EVIDENCE_JS if result.get('evidence_schema') else ''), generated)
+    for variant, variant_result in result.get('variant_results', {}).items():
+        for model in models:
+            vr = load_run(Path(next(p[model] for p in read_jsonl_campaign(variant_result['corpus_manifest']) if p['book'] == book)), model, warnings)
+            selected = [{'page': r['page'], 'status': 'ok' if (book, r['page']-1) in vr['records'] else 'missing_output',
+                         'record': vr['records'].get((book, r['page']-1))} for r in rows]
+            book_write_text(directory, f'variants/{variant}/{model}.jsonl', ''.join(json.dumps(r, ensure_ascii=False)+'\n' for r in selected), generated)
     comparisons, index_rows = [], []
     render_count = crop_count = structural_overviews = 0
     for position, row in enumerate(rows):
@@ -236,8 +243,11 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
                 overview.close()
                 diagnostic['overview'] = filename
                 structural_overviews += 1
-        body += book_page_consensus(diagnostic)
-        body += '<section><h2>Vùng bất đồng</h2>'
+        body += '<div id="page-consensus">'+book_page_consensus(diagnostic)+'</div>'
+        spatial = portable_evidence(row.get('spatial_coverage'), directory, page, generated)
+        stability = portable_evidence(row.get('variant_stability'), directory, page, generated)
+        body += book_spatial_coverage(spatial) + book_variant_stability(stability)
+        body += '<section id="character-consensus"><h2>Vùng bất đồng</h2>'
         regions = []
         for region in consensus.get('conflict_regions', []):
             region = dict(region)
@@ -284,6 +294,8 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             'reasons': row['reasons'], 'missing_models': consensus['missing_models'], 'reference': consensus['reference'],
             'excluded_models': consensus.get('excluded_models', {}), 'reading_order': row.get('reading_order', {}),
             'page_consensus': diagnostic,
+            **({'evidence_schema': result['evidence_schema'], 'spatial_coverage': spatial,
+                'variant_stability': stability, 'variant_consensus': row.get('variant_consensus')} if result.get('evidence_schema') else {}),
             'alignment': consensus.get('alignment'), 'line_alignment': consensus.get('line_alignment', {}),
             'pairwise_distances': consensus['pairwise_distances'], 'conflicts': consensus['conflicts'],
             'regions': regions}, ensure_ascii=False))
@@ -319,6 +331,10 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         'warnings': all_warnings, 'crop_regions': crop_count, 'pages_rendered_for_crops': render_count,
         'page_structure_overviews': structural_overviews,
         'quality_review_pages': quality_pages, 'comparison_settings': result.get('settings', {}),
+        **({'evidence_schema': result['evidence_schema'], 'selected_variants': result.get('selected_variants'),
+            'spatial_summary': result.get('spatial_summary'), 'stability_summary': result.get('stability_summary'),
+            'variant_manifests': {v: r['manifests'][book] for v, r in result.get('variant_results', {}).items()}}
+           if result.get('evidence_schema') else {}),
         'crop_dpi': dpi, 'generated_files': sorted(generated),
         'export_seconds': round(time.monotonic() - started, 3)}
     # Remove only stale files listed by this exporter, after writing replacements.
@@ -341,3 +357,7 @@ def export_corpus_results(result, output_dir, *, include_crops=True, create_zip=
         names = [f'{name}_{hashlib.sha256(book.encode()).hexdigest()[:8]}' for name, book in zip(names, books)]
     return [export_ocr_book(result, book, Path(output_dir) / name, include_crops=include_crops,
                            create_zip=create_zip, dpi=dpi, renderer=renderer) for book, name in zip(books, names)]
+
+
+def read_jsonl_campaign(path):
+    return json.loads(Path(path).read_text(encoding='utf8'))['pairs']

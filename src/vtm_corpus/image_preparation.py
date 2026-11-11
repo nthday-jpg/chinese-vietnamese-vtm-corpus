@@ -214,7 +214,7 @@ def _page_geometry(extra, box, input_size, offset, region_index):
     for entry in extra.get("text_lines", []):
         entry["polygon"] = transform(entry.get("polygon"))
         entry["region_index"] = region_index
-    for field in ("blocks", "boxes"):
+    for field in ("blocks", "boxes", "spatial_regions"):
         for entry in extra.get(field, []):
             entry["box"] = transform(entry.get("box"))
             entry["region_index"] = region_index
@@ -262,6 +262,9 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
                         resized=crop.size != (box[2]-box[0],box[3]-box[1]),
                         variant=prepared["variant"],variant_sha256=entry["sha256"],
                         operation=entry["operation"],canonical_region_id=prepared["regions"][i]["id"],
+                        provenance=entry.get("provenance", "source_observation" if prepared["variant"] == "original" else "deterministic_transformation"),
+                        model_identity=entry.get("model_identity"),
+                        coordinate_mapping_evidence=entry.get("coordinate_mapping_evidence", "crop_and_scale_geometry"),
                         input_to_source=[(box[2]-box[0])/crop.width,0,0,(box[3]-box[1])/crop.height,box[0],box[1]])
         else:
             crop, meta = prepare_region(image, box, cfg, native=native)
@@ -289,7 +292,7 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
             extra = {**ordered, "region_reading_order": order_info}
         records.append({"index": i, "page_box": list(box), **meta, "text": text, "raw": extra})
         mapped = _page_geometry(extra, box, crop.size, offset, i)
-        for field in ("character_boxes", "text_lines", "blocks", "boxes"):
+        for field in ("character_boxes", "text_lines", "blocks", "boxes", "spatial_regions"):
             if field in mapped:
                 merged.setdefault(field, []).extend(mapped[field])
         offset += len(comparison_text(text))

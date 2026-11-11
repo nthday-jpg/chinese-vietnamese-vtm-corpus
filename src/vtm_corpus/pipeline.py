@@ -355,7 +355,8 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--image-config", json.dumps({key: getattr(cfg, key) for key in (
             "segmentation", "reading_direction", "segmentation_args", "region_max_pixels",
             "region_max_side", "region_upscale", "resolution_strict", "image_dataset",
-            "image_dataset_key", "image_variant", "image_crop_type", "image_dataset_fallback")}),
+              "image_dataset_key", "image_variant", "image_crop_type", "image_dataset_fallback",
+              "image_content_key", "allow_generated_variants")}),
         "--max-new", str(cfg.max_new_tokens), "--dtype", cfg.dtype,
         "--model", cfg.model, "--model-revision", cfg.model_revision, "--prompt", cfg.prompt,
         "--tonggu-repo", cfg.tonggu_repo, "--tonggu-config", cfg.tonggu_config,

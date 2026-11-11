@@ -80,7 +80,8 @@ def gpu_lock(directory: Path):
 
 
 def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path | None = None,
-                         *, max_books: int | None = None, cache_renders=True) -> Path:
+                         *, max_books: int | None = None, cache_renders=True,
+                         allow_unavailable_variants=False) -> Path:
     """Prepare identical selections for all configured engines; preserve model identities."""
     if len(models) < 2 or any(key != cfg.engine for key, cfg in models.items()):
         raise ValueError("Cần >= 2 model với key trùng engine, mỗi engine một cấu hình.")
@@ -145,7 +146,8 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                 cfg.limit, cfg.n_layout, cfg.fresh, cfg.resume_from = base.limit, 0, False, []
                 # Prepared content/variant identity must be bound before any
                 # prior run/checkpoint is considered reusable.
-                bind_image_dataset(cfg, source_sha, pages)
+                input_states = bind_image_dataset(cfg, source_sha, pages,
+                    allow_unavailable=allow_unavailable_variants)
                 signature = (cfg.model, cfg.model_revision, cfg.dtype, cfg.device, cfg.paddle_version,
                              json.dumps(cfg.paddle_args, sort_keys=True), cfg.tonggu_repo, cfg.tonggu_config)
                 if cfg.engine in startup and signature != startup[cfg.engine]:
@@ -166,6 +168,9 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                         directory = prior_dir
                 directory.mkdir(parents=True, exist_ok=True)
                 tasks = [{"book": book, "src": str(Path(entry["path"]).resolve()), "page": p} for p in pages]
+                if allow_unavailable_variants:
+                    for task in tasks:
+                        task["prepared_input"] = input_states.get(task["page"], {"state": "missing_page"})
                 (directory / "tasks.jsonl").write_text("".join(json.dumps(t, ensure_ascii=False) + "\n" for t in tasks), encoding="utf-8")
                 manifest_path = directory / "run_manifest.json"
                 old = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}

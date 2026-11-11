@@ -196,7 +196,9 @@ class Paddle:
         print("[model] Paddle: bắt đầu import paddleocr", flush=True)
         from paddleocr import PaddleOCRVL
         print(f"[model] Paddle: bắt đầu tải/khởi tạo PaddleOCR-VL {a.paddle_version} (dùng cache nếu có)", flush=True)
-        self.pipe = PaddleOCRVL(pipeline_version=a.paddle_version, **json.loads(a.paddle_args))
+        options = json.loads(a.paddle_args)
+        self.spatial_frame_safe = all(options.get(k) is False for k in ('use_doc_orientation_classify', 'use_doc_unwarping'))
+        self.pipe = PaddleOCRVL(pipeline_version=a.paddle_version, **options)
         self.max_new = a.max_new
         self.model_min_pixels = getattr(a, "model_min_pixels", None)
         self.model_max_pixels = getattr(a, "model_max_pixels", None)
@@ -210,7 +212,8 @@ class Paddle:
         # Unsupported APIs must fail visibly; never silently drop quality limits.
         res = list(self.pipe.predict(img_path, **kwargs))[0]
         text, extra = self.parse(res.json)
-        return text, {**extra, "model_input": {"requested": kwargs, "observation": "native_internal_unavailable"}}
+        return text, {**extra, "coordinate_frame": "input_image" if self.spatial_frame_safe else "unverified_native_transform",
+                      "model_input": {"requested": kwargs, "observation": "native_internal_unavailable"}}
 
     @staticmethod
     def parse(j):
@@ -348,7 +351,15 @@ class TongGu:
         result = self.predict(img_path, output, self.config, visualize=False, crop_blocks=True)
         if result.status != "ok":
             raise RuntimeError(f"TongGuOCR returned status={result.status}")
+        # Upstream joins recognition by block_id. These are coarse block contexts;
+        # sparse canvases do not establish positions of individual recognized glyphs.
+        recognized = {b.block_id: b.ocr_text for b in getattr(result, 'ocr_blocks', [])}
+        spatial = [{"box": b['bbox'], "text": recognized[b['block_id']],
+                    "granularity": "block", "method": "tonggu_recognized_block",
+                    "sparse_canvas_applied": b.get('sparse_canvas_applied', False)}
+                   for b in result.blocks if b.get('block_id') in recognized and recognized[b['block_id']]]
         return result.ocr_text, {"tonggu_layout": result.line_bboxes, "tonggu_blocks": result.blocks,
+                                 "spatial_regions": spatial, "coordinate_frame": "input_image",
                                  "hit_max": None, "character_boxes": [],
                                  "model_input": {"requested": {key: self.config["ocr"]["inference"].get(key)
                                      for key in ("image_min_pixels", "image_max_pixels")},

@@ -61,6 +61,8 @@ class OCRConfig:
     image_variant: str = "original"
     image_crop_type: str = "group"          # page | group | column | native (full-page native layout)
     image_dataset_fallback: bool = False    # explicit fallback for missing pages, never corrupt data
+    image_content_key: str = ""             # verified restoration inputs, independent of other variants
+    allow_generated_variants: bool = False # experimental DiffTSR/UniHIR; never source evidence
     max_new_tokens: int = 4096
     dtype: str = "fp16"                     # fp32 | fp16 | bf16 (hunyuan)
     model: str = "tencent/HunyuanOCR"
@@ -110,8 +112,11 @@ class OCRConfig:
             raise ValueError("segmentation_args must be a dictionary")
         if self.image_crop_type not in {"page", "group", "column", "native"}:
             raise ValueError("image_crop_type must be page, group, column or native")
-        if self.image_variant not in {"original", "clahe", "bicubic_x2"}:
+        if self.image_variant not in {"original", "clahe", "bicubic_x2", "bicubic_x4", "denoised",
+                                      "realesrgan_x4", "tadisr_x4", "difftsr", "unihir_restoration"}:
             raise ValueError("Unsupported image_variant")
+        if self.image_variant in {"difftsr", "unihir_restoration"} and not self.allow_generated_variants:
+            raise ValueError("Generated-content variants require allow_generated_variants=True")
         if not self.image_dataset and (self.image_variant != "original" or self.image_dataset_key):
             raise ValueError("Image variants/snapshot identity require image_dataset")
 
@@ -121,6 +126,12 @@ class OCRConfig:
             "worker_python", "worker_wsl_distro", "worker_pythonpath", "budget_h", "stall_min", "max_restarts", "n_layout",
             "layout_budget_h", "export", "fresh", "resume_from",
         }
+        if not self.image_content_key:
+            exclude.add("image_content_key")
+        else:
+            exclude.update({"image_dataset", "image_dataset_key"})
+        if not self.allow_generated_variants or self.image_variant not in {'difftsr', 'unihir_restoration'}:
+            exclude.add("allow_generated_variants")
         # Preserve legacy checkpoint hashes when the prepared input is disabled.
         if not self.image_dataset:
             exclude.update({"image_dataset", "image_dataset_key", "image_variant", "image_crop_type", "image_dataset_fallback"})

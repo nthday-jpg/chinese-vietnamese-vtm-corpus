@@ -115,6 +115,12 @@ def multi_tables(result):
         pages[-1]["Cấu trúc trang"] = diagnostic.get("status", "not_assessed")
         pages[-1]["Dấu hiệu cấp trang"] = page_consensus_summary(diagnostic)
         pages[-1]["Không bỏ phiếu"] = "; ".join(f"{name}: {', '.join(issues)}" for name, issues in c.get("excluded_models", {}).items())
+        if row.get('spatial_coverage'):
+            spatial = row['spatial_coverage']
+            pages[-1]['Coverage'] = spatial['status']
+            pages[-1]['Ứng viên nghi chưa phủ'] = spatial.get('summary', {}).get('potential_uncovered')
+        if row.get('variant_stability'):
+            pages[-1]['Cặp biến thể đổi chữ'] = row['variant_stability']['summary']['changed_pairs']
         for conflict in c["conflicts"]:
             conflicts.append({"Sách": row["book"], "Trang": row["page"], "Cột": conflict["index"],
                               **{name: "không bỏ phiếu (output cần kiểm tra)" if name in c.get("excluded_models", {}) else "chưa có output" if value is None else value or "∅"

@@ -377,7 +377,7 @@ def dataset_page(root, descriptor, source_sha, page):
     return record
 
 
-def bind_image_dataset(cfg, source_sha, pages):
+def bind_image_dataset(cfg, source_sha, pages, *, allow_unavailable=False):
     """Bind an immutable snapshot before looking up OCR checkpoints."""
     from .worker_paths import runtime_path
     if not cfg.image_dataset:
@@ -387,11 +387,29 @@ def bind_image_dataset(cfg, source_sha, pages):
     # Freeze the snapshot rather than following a mutable dataset.json later.
     if not snapshot_path.is_file():
         raise ValueError("Dataset immutable snapshot file is missing")
+    if dataset_open(snapshot_path)[1] != descriptor:
+        raise ValueError("Immutable dataset snapshot differs from descriptor")
     cfg.image_dataset = str(runtime_path(snapshot_path).resolve())
     cfg.image_dataset_key = descriptor["snapshot_id"]
+    from .prepared_variants import bind_restoration_variant, restoration_index
+    if descriptor.get("restoration"):
+        restoration_index(root, descriptor)
+    needs_extension = cfg.image_variant not in {"original", "clahe", "bicubic_x2"}
+    for page in pages:
+        rec = dataset_page(root, descriptor, source_sha, page)
+        kind = "page" if cfg.image_crop_type == "native" else cfg.image_crop_type
+        if rec and any(cfg.image_variant not in r["images"] for r in rec["regions"] if r["crop_type"] == kind):
+            needs_extension = True
+    if needs_extension:
+        return bind_restoration_variant(cfg, root, descriptor, source_sha, pages,
+                                        allow_unavailable=allow_unavailable)
+    states = {}
     for page in pages:
         record = dataset_page(root,descriptor,source_sha,page)
         if record is None:
+            if allow_unavailable:
+                states[page] = {"state": "missing_page"}
+                continue
             if cfg.image_dataset_fallback:
                 continue
             raise ValueError(f"Prepared dataset missing source {source_sha}, page {page+1}")
@@ -402,6 +420,8 @@ def bind_image_dataset(cfg, source_sha, pages):
         for region in record["regions"]:
             if region["crop_type"]==kind and cfg.image_variant not in region["images"]:
                 raise ValueError(f"Missing variant {cfg.image_variant} for {region['id']}")
+        states[page] = {"state": "ok"}
+    return states
 
 
 def dataset_ocr_page(cfg, source_sha, page):
@@ -415,6 +435,8 @@ def dataset_ocr_page(cfg, source_sha, page):
             return None
         raise ValueError(f"Prepared dataset missing page {page+1}")
     layout = dataset_validate_page(root,record,check_pixels=False)
+    from .prepared_variants import resolve_variant_page
+    record = resolve_variant_page(root, descriptor, record, cfg)
     image = dataset_load_image(root,record["source"])
     kind = "page" if cfg.image_crop_type=="native" else cfg.image_crop_type
     regions = [r for r in record["regions"] if r["crop_type"]==kind]

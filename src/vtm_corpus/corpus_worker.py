@@ -20,7 +20,7 @@ from .corpus_ocr import now, write_json
 from .pipeline import export_ocr
 from .worker_paths import runtime_path
 from .image_preparation import run_prepared_page
-from .image_dataset import dataset_ocr_page
+from .image_dataset import dataset_ocr_page, dataset_file_hash
 
 
 def create_engine(engine: str, cfg: OCRConfig):
@@ -80,7 +80,8 @@ def corpus_book_plan(pair, engine, attempt):
                     failed.add(int(error['page']))
             except (json.JSONDecodeError, KeyError, ValueError):
                 pass
-    todo = [task for task in tasks if task['page'] not in done and task['page'] not in failed]
+    todo = [task for task in tasks if task['page'] not in done and task['page'] not in failed
+            and task.get('prepared_input', {}).get('state', 'ok') == 'ok']
     return dict(pair=pair, directory=directory, manifest_file=manifest_file, manifest=manifest,
                 cfg=cfg, name=name, raw=raw, errors=errors, tasks=tasks, done=done, todo=todo)
 
@@ -156,6 +157,10 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                 if todo and backend is None:
                     backend = factory(engine, cfg)
                     print(f"[corpus] {engine}: model đã tải; dùng chung cho toàn bộ sách đã chọn.", flush=True)
+                if todo:
+                    expected_sha = manifest.get('books', {}).get(pair['book'], {}).get('sha256')
+                    if expected_sha and expected_sha != dataset_file_hash(runtime_path(todo[0]['src'])):
+                        raise ValueError('Source PDF hash changed since OCR planning')
                 if backend is not None:
                     backend.max_new = cfg.max_new_tokens
                     backend.model_min_pixels, backend.model_max_pixels = cfg.model_min_pixels, cfg.model_max_pixels
