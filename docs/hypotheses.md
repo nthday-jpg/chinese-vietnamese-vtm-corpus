@@ -1,5 +1,34 @@
 # Các giả thuyết nghiên cứu
 
+## Các hướng mở rộng xử lý ảnh
+
+Các giả thuyết dưới đây tạo variant độc lập trong Notebook 1, chưa có kết luận
+accuracy. Notebook 3 so cùng nguồn/vùng, cùng cấu hình OCR, giữ mọi reading và
+đối chiếu thủ công trên original; không chạy lại restoration khi đánh giá.
+
+| Hướng | Giả thuyết và cơ chế | Điều kiện phù hợp | Rủi ro | Kiểm chứng ở Notebook 3 |
+|---|---|---|---|---|
+| Color-aware Enhancement | Lab L, kênh RGB và tương phản màu có thể tách mực khỏi giấy vàng | Trang có màu/mực đỏ; xem riêng từng kênh | Kênh đỏ làm mực đỏ sáng lên; grayscale mất thông tin màu | So original, Lab và từng kênh; rà cả chữ đỏ lẫn đen |
+| Background / Illumination Normalization | Chia luminance cho nền Gaussian để giảm độ sáng biến thiên, giữ chroma | Nền biến thiên chậm hơn bề rộng nét | Halo, khuếch đại nhiễu, mất nét nhạt | So crop có gradient nền, kiểm nét yếu và reading thay đổi |
+| Adaptive Binarization | Sauvola/Niblack dùng trung bình và độ lệch chuẩn cục bộ | Độc lập hướng viết; cửa sổ lớn hơn nét nhưng nhỏ hơn biến thiên nền | Xóa nét nhạt, nối nét; mất màu | Giữ cả hai variant, ghi window/k/r; rà riêng dấu đỏ |
+| Classical Denoising / Sharpening | NLM/bilateral giảm nhiễu; unsharp nhẹ tăng cạnh | Nhiễu/blur vừa, không yêu cầu crop dòng | Xóa/chẻ/nối nét và halo | So riêng từng phương pháp, original và bicubic |
+| Neural Document Restoration | DocRes dùng prompt theo task, DocDiff coarse + residual diffusion | Ảnh trang/vùng, không ràng buộc dòng ngang; Hán cổ chưa được xác minh | Thêm/xóa nét, thay màu, khác miền huấn luyện | Ablation riêng appearance/deblur/deshadow/binarization, không nối chuỗi |
+| Deblurring | Restormer motion/defocus và DocRes/DocDiff phục hồi tín hiệu nhòe khác nhau | Chọn đúng loại checkpoint; không coi Gaussian là real noise | Sharpen sai, hallucination, domain shift | Phân tầng loại blur, so original/bicubic và đọc thủ công |
+| Bleed-through Reduction | Có thể giảm mực mặt sau bằng phân biệt tín hiệu/nền | Một mặt không đủ phân biệt nét thật; hai mặt cần registration | Xóa chữ thật mờ | Chưa triển khai model chuyên biệt khi chưa đủ source/weights/license; cần nhãn mặt trước/mặt sau |
+| Restoration Fidelity | Ảnh rõ hơn có thể giúp OCR nhưng làm sai hình dạng glyph | Mọi restoration; đặc biệt diffusion/generative | Dị thể bị thay, consensus cùng sai | H10: rescue/regression/uncertain trên cùng crop; agreement không là accuracy |
+
+Classical trên không phụ thuộc hướng viết. DocRes/DocDiff/Restormer nhận được
+ảnh dọc và nhiều cột nhưng chưa được chứng minh hiệu quả trên Hán cổ. DiffTSR
+bị giới hạn dòng/canvas/prior, được bỏ khỏi lựa chọn tự động; xoay cột không giải
+quyết vấn đề. UniHIR có prior inscription và canvas danh nghĩa, nhưng không có
+ràng buộc một dòng ngang; giữ trong `all_eligible` để thí nghiệm, kèm preflight
+và nhãn generative. Không tự tách glyph ở chữ dính hoặc ghép cột nhỏ thành dòng.
+
+Nguồn implementation: [DocRes](https://github.com/ZZZHANG-jx/DocRes),
+[DocDiff](https://github.com/Royalvice/DocDiff),
+[Restormer](https://github.com/swz30/Restormer),
+[Sauvola/Niblack](https://scikit-image.org/docs/stable/auto_examples/segmentation/plot_niblack_sauvola.html).
+
 Mỗi thành phần được thử vì một giả thuyết có thể kiểm chứng về nhận dạng hoặc
 khả năng xác minh. Có mã chạy được chưa chứng minh giả thuyết đúng. Cần xác định
 đối chứng, giữ cùng trang/crop và ghi cả kết quả xấu trước khi xem kết quả tốt.
@@ -156,8 +185,9 @@ Không có bản chuẩn chỉ đo phân tách màu và thay đổi OCR, chưa �
 **Giới hạn:** Giấy ố, màu scan sai, mực đen bạc màu hoặc dấu đè chữ có thể làm
 phân tách không xác định; kết quả có thể tốt ở một sách nhưng sai ở sách khác.
 
-**Trạng thái:** Giữ được RGB nguồn, có CLAHE/denoise; chưa có luồng phân tích
-mực màu chuyên biệt được tích hợp và đánh giá. Detector coverage hiện dùng grayscale.
+**Trạng thái:** Đã có RGB/Lab channel variants, `red_ink` riêng và normalization
+giữ chroma; kiểm thử màu/geometry trên fixture, chưa đánh giá lợi ích OCR trên
+Hán cổ. Detector coverage hiện vẫn dùng grayscale.
 
 ## H07 — Intra-document Glyph Retrieval
 

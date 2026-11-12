@@ -1,5 +1,156 @@
 # Vận hành và kiểm chứng
 
+## Tài sản restoration mở rộng — bàn giao ngày 12/11/2026
+
+Implementation đã có trong Notebook 1 và reader Notebook 3. Chưa chạy notebook,
+inference thật hoặc upload Kaggle. Bảng dưới phân biệt mã tích hợp với asset
+thực tế; “offline” luôn có điều kiện runtime Linux cp313 phù hợp báo cáo môi
+trường và probe target thành công.
+
+Sau khi người dùng chạy scripts, đã kiểm lại: cả sáu nhóm trong catalog đều đủ
+và qua checksum, không có dependency metadata lỗi; verifier trả mã 0. UniHIR
+được kiểm riêng: 18 file model/font (29.772.403.293 byte), 27 file source, bốn
+wheel overlay và source FlashAttention có CUTLASS đều đạt. Báo cáo nằm trong
+`manifests/restoration_verification.json` và `manifests/unihir_current_verification.json`.
+Native FlashAttention build, GPU inference và Kaggle runtime vẫn chưa kiểm.
+
+Sửa phân loại UniHIR: việc gộp nó với DiffTSR rồi bỏ khỏi `all_eligible` là quá
+rộng. UniHIR phục hồi toàn trang; prior inscription, rủi ro sinh nét và yêu cầu
+tài nguyên không phải ràng buộc một dòng ngang. Đã đưa `unihir_restoration` trở
+lại `all_eligible`, giữ preflight và nhãn generative; không đổi `VARIANTS` mặc
+định. Notebook 3 vẫn cần `ALLOW_GENERATED_VARIANTS=True` khi so ảnh UniHIR.
+Kiểm tra sau sửa: 29/29 test CPU/mock đạt, gồm UniHIR trên mọi crop, preflight
+thiếu asset, publish/reader/resume và loại DiffTSR khỏi tự chọn; log tại
+`work/restoration_unihir_followup_tests.log`. Không inference model thật.
+
+| Phương pháp / variant | Phạm vi | Checkpoint | Asset hiện tại / offline |
+|---|---|---|---|
+| Giữ `original`, `clahe`, `denoised`, `bicubic_x2`, `bicubic_x4` | Dọc/ngang/nhiều cột | Không | CPU; không tải model |
+| `grayscale_luma`, `grayscale_red`, `grayscale_green`, `grayscale_blue` | Chọn tín hiệu sáng/kênh màu | Không | CPU; mỗi kênh là thí nghiệm riêng, có thể làm mờ mực màu |
+| `lab_l`, `lab_a`, `lab_b` | Luminance/chroma; a/b là ảnh phân tích màu | Không | CPU; giữ original RGB |
+| `red_ink` | Phân tích riêng mực đỏ, giữ màu đỏ | Không | CPU; cố ý chỉ giữ ứng viên đỏ trong variant này, không thay original |
+| `background_normalized` | Gaussian nền + sửa Lab L, giữ chroma | Không | CPU; sigma/strength/floor riêng |
+| `sauvola`, `niblack` | Ngưỡng cục bộ độc lập hướng viết | Không | CPU; window_size/k, Sauvola thêm r; cảnh báo xóa/nối nét |
+| `bilateral`, `unsharp` | Khử nhiễu/cạnh nhẹ trên Lab L | Không | CPU; tham số bảo thủ, giữ chroma |
+| `realesrgan_x4` | Trang/vùng ×4 | `RealESRGAN_x4plus.pth` | Có sẵn, SHA-256 đạt; không tải lại |
+| `tadisr_x4` (+ mask chẩn đoán) | Trang/vùng, tile hai trục | Adapter + đầy đủ CogView4 shard/config/tokenizer | Có sẵn 31,914 GB, SHA-256 đạt; prompt cố định được tạo offline trong worker nếu thiếu |
+| `docres_appearance` | Appearance trên trang/vùng | `docres.pkl` | Đã tải, SHA-256 upstream đạt; runtime metadata đủ |
+| `docres_deblurring` | Deblur trên trang/vùng | `docres.pkl` | Dùng cùng checkpoint, task/prompt/cache riêng |
+| `docres_deshadowing` | Deshadow trên trang/vùng | `docres.pkl` | Task độc lập; không nối chuỗi |
+| `docres_binarization` | Binarization trên trang/vùng | `docres.pkl` | Cảnh báo mất màu/nét; không tự thay original |
+| `docdiff_deblurring` | Document deblur/enhancement | `init.pth` + `denoiser.pth`, schedule linear 100 | Đã tải cả hai, đối chiếu Git blob + SHA-256; không dùng seal-removal weights |
+| `restormer_motion_deblurring` | Motion blur | `motion_deblurring.pth` | Người dùng đã tải; checksum/metadata đạt |
+| `restormer_defocus_deblurring` | Single-image defocus | `single_image_defocus_deblurring.pth` | Đã tải/kiểm; không yêu cầu ảnh dual-pixel |
+| `restormer_real_denoising` | Real noise | `real_denoising.pth` | Đã tải/kiểm; normalization đúng checkpoint |
+| `restormer_gaussian_denoising` | Blind Gaussian color noise | `gaussian_color_denoising_blind.pth` | Đã tải/kiểm; không mô tả là real denoising |
+| `unihir_restoration` | Phục hồi sinh nội dung toàn trang/vùng, có trong `all_eligible` | `model.safetensors`, VAE/config/tokenizer/font | Đủ và kiểm hash; native build và GPU chưa xác minh |
+
+Model tổng quát nhận được bố cục chữ dọc/nhiều cột, chưa chứng minh hiệu quả
+trên Hán cổ. DocRes giữ nguyên định nghĩa DTSPrompt upstream, bỏ import MBD không
+được dùng ở bốn task. Adapter dùng padding và tile, không ép ảnh thành vuông như
+nhánh appearance/deshadow kích thước lớn của upstream; ghi khác biệt này trong
+diagnostics. DocDiff dùng cả coarse predictor/residual sampler. Bỏ toàn bộ padding
+trước khi lưu; output cùng canvas nguồn, không xoay/reflow chữ.
+
+Lệnh thực tế trên Windows, chạy từ repo hoặc dùng đường dẫn tuyệt đối tới script:
+
+```powershell
+.venv/Scripts/python.exe -X utf8 tools/prepare_restoration_assets.py
+.venv/Scripts/python.exe -X utf8 tools/download_large_restoration_assets.py --list --all
+.venv/Scripts/python.exe -X utf8 tools/download_large_restoration_assets.py --all
+.venv/Scripts/python.exe -X utf8 tools/verify_restoration_assets.py --all
+```
+
+Linux dùng `python` trong môi trường có `packaging`; không cài lại Torch vào
+kernel đang hoạt động. `--model restormer`, `--model docres_mbd`, `--model tadisr`
+chọn riêng nhóm; có thể lặp `--model`. Tải tiếp mặc định, không cần cờ resume.
+`--all` ở script lớn lấy toàn bộ nhóm trong catalog, gồm MBD phụ trợ; không lấy
+DiffTSR bị loại khỏi tự động; UniHIR dùng script tải riêng và asset hiện có.
+`--verify` chỉ kiểm tra/báo cáo. Thiếu asset
+hoặc dependency trả mã 2; không diễn giải mã này thành inference thất bại.
+
+| Nhóm lớn/chậm | Dung lượng đã xác minh từ metadata nguồn | Đích trong `kaggle_upload/` | Nguồn / license / trạng thái |
+|---|---|---|---|
+| TADiSR adapter + CogView4 | 31.914.476.368 byte | `models/image_restoration/tadisr/` | HF upstream pin trong catalog; MIT source, adapter research use, CogView4 Apache-2.0; đã có đủ local |
+| Restormer, 4 checkpoint | 418.624.772 byte (~419 MB); cả source/config 418.700.756 byte | `models/image_restoration/restormer/` | [Official v1.0 release](https://github.com/swz30/Restormer/releases/tag/v1.0); MIT; người dùng đã tải, checksum đạt |
+| DocRes MBD phụ trợ | 712.981.585 byte (~713 MB) | `models/image_restoration/docres/mbd.pkl` | [Space được README chính thức liên kết](https://huggingface.co/spaces/qubvel-hf/documents-restoration); SHA-256 LFS đạt; đã tải, chỉ cần nếu nghiên cứu dewarp sau này |
+
+DocRes chính 183.260.711 byte; DocDiff hai checkpoint 32.915.186 byte đã tải mới.
+Không có GPU/native build hoặc tải nhóm lớn trong đợt này. Restormer release
+không công bố SHA-256; lần tải đầu kiểm URL release/size, khóa SHA-256 vào receipt
+và mọi lượt kiểm sau dùng đúng hash đó. Phân biệt checksum publisher (DocRes,
+DocDiff/Git, TADiSR) với checksum lần tải đầu, không tự rebaseline file đã hỏng.
+
+Catalog pin nguồn/revision ở [restoration_assets_catalog.json](../tools/restoration_assets_catalog.json).
+Verifier xuất `packages/image_restoration/manifests/restoration_verification.json`
+và `.txt`: download, integrity, runtime, thiếu file, lỗi dependency/license và
+trạng thái Kaggle/GPU riêng. `document_runtime.json` hiện có một PDFium wheel và
+reuse dependency closure từ `kernel_snapshot.json`; TADiSR có overlay riêng.
+Wheels đã kiểm metadata/ABI Linux cp313, hash và dependency closure; chưa cài/probe
+trên Kaggle. Khi kernel đổi, dùng `--environment-report <JSON notebook 0 mới>`;
+không dùng báo cáo Windows hoặc hạ Torch/NumPy để ép qua.
+
+Các file chính thay đổi: code `restoration_classical.py`, `document_restoration.py`,
+`image_dataset.py`, `prepared_variants.py`, `config.py`; hai notebook 1/3; tools
+prepare/download/verify/catalog/runtime và `update_restoration_notebook.py`;
+năm file docs hiện có. Notebook 2, raw OCR checkpoints và canonical nguồn không đổi.
+Builder cập nhật source cells, giữ ô cấu hình hiện có của Notebook 3. Notebook 1
+vẫn nén lossless upstream cũ và dưới 1 MB.
+
+Cấu trúc thực tế sau khi kiểm lại lượt tải của người dùng:
+
+```text
+kaggle_upload/
+  models/                         # Dataset models
+    image_restoration/
+      realesrgan/, tadisr/         # đã có và kiểm hash
+      docres/docres.pkl            # đã tải
+      docres/mbd.pkl               # đã tải/kiểm; MBD phụ trợ, không bật dewarp
+      docdiff/init.pth, denoiser.pth
+      restormer/                  # đủ 4 checkpoint và assets.json
+      unihir/                     # đủ model/font; ứng viên all_eligible
+      difftsr/                    # tài sản cũ, không chọn/tải tự động
+  packages/                       # Dataset packages
+    image_restoration/
+      sources/docres/, docdiff/, restormer/  # source/config/license đã pin
+      sources/<model>-<revision>.zip         # archive nhỏ, đã kiểm hash
+      sources/TADiSR/, BasicSR/, Real-ESRGAN/
+      wheels/                     # overlay + PDFium Linux cp313
+      requirements/document.txt, tadisr.txt
+      runtime/                    # helper versioned, giữ helper legacy nguyên byte
+      manifests/                  # catalog, receipts, source archive/runtime inventory
+```
+
+Tài sản local đã xác minh không đồng nghĩa Dataset trên Kaggle đã đầy đủ. ZIP
+models/packages cũ chưa cập nhật tự động. Upload nguyên hai thư mục gốc sau khi
+script lớn + verifier đạt theo các model bạn chọn. MBD thiếu không cản bốn task
+DocRes; nếu không cần dewarp, dùng verifier mặc định thay `--all`.
+
+Kiểm chứng phần mềm của đợt này: bộ hồi quy **417 test: OK, 1 skipped**
+(`work/restoration_regression_tests.log`); bộ kiểm thử mở rộng cuối cùng **24/24
+đạt** (`work/restoration_extension_tests.log`). Có fixture CPU/mock cho geometry,
+ảnh dọc/mực đỏ, checkpoint loading contracts, resume/cache, chuyển root, tải
+tiếp/HTTP range/hash và script chạy từ cwd khác. Notebook JSON/Python syntax,
+checksum payload upstream, giới hạn 1 MB và builder chạy lại byte-identical đạt.
+Không có Run All, GPU inference, build native nặng hoặc upload Kaggle. Kết quả
+mock không xác nhận model thật hoạt động hoặc tăng accuracy OCR.
+
+Các script trong `tools/` tự tìm repository root, đặt model vào
+`kaggle_upload/models/image_restoration/`, source/wheels/requirements/manifests
+vào `kaggle_upload/packages/image_restoration/`. Hai gốc `models/` và `packages/`
+được upload thành hai Dataset riêng. Không dùng cache Hugging Face ngoài staging
+làm vị trí cuối. Giữ file tải dở dưới `.part`, chỉ công bố sau kiểm checksum.
+
+Chuẩn bị nhẹ và tải lớn là hai bước riêng. Nhóm trên 5 GB hoặc ước tính quá
+5 phút (mặc định 1 MB/s), nhóm chưa biết kích thước và native build dài được
+hoãn. Người dùng tự chạy script tải lớn. Verifier phải báo thiếu/corrupt/license
+blocker và không nâng trạng thái thành GPU verified chỉ vì đủ file.
+
+Với bố cục cột lớn kèm cột nhỏ: giữ `page` hoặc `group` cho phục hồi tổng quát;
+xem preview rồi mới chọn `column`. Không cần biết ranh giới từng chữ. DiffTSR
+không còn trong tự chọn/tải; không xoay cả cột. UniHIR có trong `all_eligible`.
+Không bật dewarp/end2end DocRes vì không có mapping phi tuyến.
+
 Hướng dẫn đối chiếu mã ngày **12/11/2026**. Bắt đầu bằng một sách/một trang;
 chỉ mở rộng sau khi xem ảnh, đường cắt, output và trạng thái lỗi. Các thuật ngữ
 và hợp đồng tọa độ nằm trong [pipeline](pipeline.md); mục tiêu đánh giá nằm trong
@@ -124,10 +275,10 @@ profile là 6000, không ép model sinh đủ; `hit_max` cần rà soát. Xem th
 | `realesrgan_x4` | Neural restoration ×4; Real-ESRGAN BSD-3-Clause, BasicSR Apache-2.0; RRDBNet 64/23/32, weights ×4plus. |
 | `tadisr_x4` | Neural restoration ×4; code MIT, adapter phạm vi research, base CogView4 Apache-2.0. Mask đi kèm không dùng làm ảnh OCR. |
 | `difftsr` | Apache-2.0; cần vùng đã duyệt: dòng ngang thẳng, 1–24 chữ, gần tỷ lệ 4:1, cho phép prior giản thể upstream; output 512×128. Không xoay/reflow cột dọc để ép chạy. |
-| `unihir_restoration` | CC BY-NC-ND 4.0, nghiên cứu phi thương mại; cần khai báo vùng inscription và opt in. Canvas danh nghĩa không xác nhận glyph nguồn. Quyền phân phối lại font chưa xác lập chỉ từ metadata tác giả. |
+| `unihir_restoration` | Có trong `all_eligible`; CC BY-NC-ND 4.0, nghiên cứu phi thương mại. Chọn được page/group/column, chưa chứng minh phù hợp Hán cổ. Canvas danh nghĩa không xác nhận glyph nguồn; quyền phân phối lại font chưa xác lập chỉ từ metadata tác giả. |
 
 Notebook 1 dùng `REVIEWED_REGIONS` để khai báo điều kiện sau khi xem original;
-UniHIR cần `ACCEPT_UNIHIR_NONCOMMERCIAL`. Notebook 3 chỉ nhận DiffTSR/UniHIR khi
+Công cụ tải UniHIR cũ giữ điều kiện phi thương mại. Notebook 3 chỉ nhận DiffTSR/UniHIR khi
 `ALLOW_GENERATED_VARIANTS=True`. Không tự chuyển phồn thể thành giản thể do
 prior `zhconv(...,'zh-cn')`. Giữ license/revision/URL/checksum trong `assets.json`
 và manifest tài sản; không suy giấy phép weights/PDF từ giấy phép wrapper.
@@ -228,7 +379,7 @@ chạy lại model. CLI một engine vẫn dùng được, ví dụ từ root:
 
 CLI không chọn trang thì có thể chạy cả sách; segmentation mặc định của CLI là
 `none`, khác notebook. `vtm images prepare`, `validate`, `package` là luồng core;
-packager core không đóng extension restoration. Chuyển dataset notebook 1 phải
+packager core hiện đóng đủ extension restoration. Chuyển dataset notebook 1 phải
 giữ đủ object/report/manifest/snapshot được tham chiếu.
 
 ## Checkpoint và tái lập
@@ -354,8 +505,8 @@ JSON/schema, cú pháp và source nhúng khớp builder. Notebook 1 giữ checks
 upstream và dung lượng dưới 1 MB. Log hồi quy mới nằm ở
 `work/h10_regression_tests.log` trong workspace này.
 
-Không chạy phiên notebook/Run All, inference model thật, tải weights, cài môi
-trường GPU hoặc upload/thực nghiệm Kaggle. Kiểm thử worker giả chỉ xác minh
+Riêng đợt H10 trước đợt ảnh mở rộng không chạy notebook/Run All, inference thật,
+tải weights, cài môi trường GPU hoặc upload Kaggle. Kiểm thử worker giả chỉ xác minh
 điều phối và hợp đồng, không chứng minh OCR đúng hay model thật hoạt động.
 Browser không khả dụng trong phiên kiểm tra này, nên chưa xác minh layout và
 thao tác HTML trên trình duyệt thật. Các giới hạn về model bên dưới vẫn giữ nguyên.
@@ -404,7 +555,8 @@ từ CPU hay GPU local 8 GB sang Kaggle, và không dùng proxy làm kết luậ
 Một số công cụ local trong `configs/`, `scripts/`, `tools/`, `tests/` vẫn bị ignore;
 liên kết vận hành lịch sử được đối chiếu với workspace hiện có. Đợt H10 cho phép
 Git theo dõi các builder notebook, installer dependency và các test cần cho thay
-đổi này. Các tài sản models/packages không được đóng gói hay upload lại.
+đổi này. Đợt ảnh mở rộng đã thêm source/archive nhỏ, weights DocRes/DocDiff và
+runtime metadata; chưa upload hoặc dựng lại ZIP models/packages lớn.
 
 ## Chuyển dataset giữa hai phiên Kaggle
 
@@ -415,8 +567,10 @@ kiểm tra rồi tự upload thành Kaggle Dataset; gắn vào Notebook 3 ở m�
 PDF gốc vẫn cần trong `DATA_DIR` để lập tác vụ và xác minh SHA-256.
 
 Trong Notebook 1, `VARIANT_MODE='selected'` giữ danh sách `VARIANTS` (mặc định
-original/CLAHE/×2/×4). `classical` chọn cả năm phương pháp cổ điển;
-`all_eligible` yêu cầu cả chín phương pháp. Điều kiện vùng, asset, runtime và
+original/CLAHE/×2/×4). `classical` chọn 18 phương pháp cổ điển;
+`all_eligible` chọn thêm 11 neural variant tổng quát và UniHIR generative
+(TADiSR kèm mask chẩn đoán).
+Điều kiện vùng, asset, runtime và
 license vẫn được giữ; không ép DiffTSR/UniHIR chạy trên scan không phù hợp.
 
 ```python

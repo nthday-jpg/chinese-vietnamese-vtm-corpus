@@ -1,5 +1,10 @@
 # OCR chữ Hán cổ và dịch tiếng Việt
 
+Mở rộng ảnh ngày 12/11/2026: Notebook 1 tạo ảnh, Notebook 3 chỉ đọc variant đã
+lưu. Bổ sung xử lý màu/nền, Sauvola/Niblack, bilateral, unsharp và adapter
+DocRes/DocDiff/Restormer. Trạng thái asset và khả năng chạy offline được kiểm
+riêng; có adapter chưa có nghĩa đã chạy inference.
+
 Dự án chuyển PDF scan sách Hán, đặc biệt sách Y học cổ truyền, thành bản chép
 có thể rà soát rồi dịch sang tiếng Việt. Khó khăn chính là nguồn ít pixel, chữ
 phồn thể/dị thể, bố cục phức tạp và không có bản chép chuẩn để đối chiếu

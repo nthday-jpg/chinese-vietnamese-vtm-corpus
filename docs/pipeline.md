@@ -1,5 +1,25 @@
 # Pipeline hiện tại
 
+## Thiết kế mở rộng ảnh ngày 12/11/2026
+
+Mở rộng `VARIANT_MODE`, `VARIANT_OPTIONS`, `MODEL_OPTIONS` và `prep_*` hiện có;
+giữ core snapshot v1 và extension restoration v1. Classical mới giữ kích thước,
+không xoay ảnh. DocRes dùng DTSPrompt upstream; DocDiff dùng cả coarse predictor
+và residual denoiser; Restormer có checkpoint riêng theo task. Bỏ padding trước
+khi lưu. Dewarping bị tắt vì chưa có mapping phi tuyến. Mỗi task là một variant.
+
+Source upstream mới được pin trong `packages/image_restoration/sources/`, không
+nhúng cả repo vào notebook. Manifest dùng đường dẫn tương đối, SHA-256, kích
+thước, revision, license và dependency closure. Download, integrity, runtime,
+tương thích Kaggle và inference GPU là các trạng thái riêng. Nhóm asset trên
+5 GB, quá 300 giây hoặc chưa biết kích thước được hoãn sang script người dùng
+tự chạy, kể cả khi từng shard nhỏ. Không tải dữ liệu/optimizer dùng để training.
+
+DiffTSR giữ adapter legacy nhưng không thuộc `all_eligible`. UniHIR đã được đưa
+trở lại `all_eligible`: model xử lý toàn trang, không yêu cầu dòng ngang như
+DiffTSR. Preflight asset/runtime/VRAM và nhãn `generative_reconstruction` vẫn
+giữ nguyên; chấp nhận crop không chứng minh phù hợp miền dữ liệu hoặc đúng glyph.
+
 Notebook 1 chuẩn bị ảnh và lưu một dataset bất biến; Notebook 3 tiêu thụ dataset đó
 trong phiên Kaggle độc lập. Không dùng thư mục `/kaggle/working` của phiên trước
 làm đầu vào ngầm. Nhánh render PDF cũ vẫn được giữ để tương thích.
@@ -38,6 +58,7 @@ flowchart TD
 |---|---|
 | Notebook 1: canonical, classical, provenance, cache, QC | Đã có mã và kiểm thử CPU. |
 | Real-ESRGAN / TADiSR / DiffTSR / UniHIR | Có adapter; ảnh Real-ESRGAN đã lưu, ba adapter còn lại chưa xác nhận inference thật trong bằng chứng khảo sát. |
+| DocRes / DocDiff / Restormer | Adapter upstream thực, kiểm thử hợp đồng CPU/mock; DocRes/DocDiff đã có weights, Restormer còn hoãn download. Chưa inference thật. |
 | Notebook 3: bốn worker tuần tự, consensus, coverage, stability | Đã có mã; kiểm thử mock/synthetic không xác nhận bốn model chạy trên Kaggle. |
 | Export đầy đủ restoration extension, trạng thái lỗi chi tiết | Đã sửa; test CPU kiểm snapshot partial, archive extension và chuyển root. |
 | Restoration Ablation, Visual Fidelity, nhãn thủ công | Đã triển khai opt-in, kiểm thử synthetic/checkpoint giả; chưa xác nhận Kaggle hoặc hiệu quả OCR. |
@@ -81,8 +102,11 @@ Thiếu một vùng thì không công bố trang/biến thể như đã hoàn t�
 
 ## Xử lý ảnh và OCR
 
-Notebook 1 có CLAHE, khử nhiễu, bicubic ×2/×4 và adapter Real-ESRGAN, TADiSR,
-DiffTSR, UniHIR. Classical có thể mất nét yếu; nội suy không tái tạo thông tin.
+Notebook 1 có CLAHE, NLM, bicubic ×2/×4, kênh RGB/Lab/mực đỏ, sửa nền Gaussian,
+Sauvola/Niblack, bilateral/unsharp; adapter Real-ESRGAN, TADiSR và
+DocRes/DocDiff/Restormer và UniHIR generative. Chỉ DiffTSR giữ explicit legacy,
+không thuộc tự chọn.
+Classical có thể mất nét yếu; nội suy không tái tạo thông tin.
 Neural restoration có thể sinh nét; UniHIR là tái dựng sinh nội dung, canvas
 danh nghĩa không chứng minh vị trí glyph nguồn. `tadisr_text_mask` chỉ chẩn đoán,
 không phải ảnh OCR. Deskew/dewarp chưa có mapping hợp lệ cho luồng này.

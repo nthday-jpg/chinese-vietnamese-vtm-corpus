@@ -1,5 +1,11 @@
 # Bài toán và giới hạn
 
+Corpus gồm tám bộ sách, bảy bộ chủ yếu chữ dọc. Vùng một cột lớn phía trên và
+hai cột chú thích nhỏ phía dưới được giữ nguyên nếu không có đường cắt đáng tin
+cậy. Phục hồi ảnh tổng quát không cần tách glyph. Xoay cả cột 90° làm xoay từng
+chữ, không tạo dòng ngang đúng phân phối huấn luyện DiffTSR. Model này được loại
+khỏi lựa chọn/tải tự động; khả năng đọc dataset cũ vẫn giữ nguyên.
+
 Đầu vào là PDF scan sách chữ Hán; đầu ra mong muốn là bản chép Hán có bằng chứng
 để rà soát và bản dịch tiếng Việt theo thứ tự nội dung. Với sách Y học cổ truyền,
 một chữ sai có thể đổi tên thuốc, liều lượng hoặc phủ định, nên không thể lấy

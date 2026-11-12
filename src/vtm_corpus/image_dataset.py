@@ -18,6 +18,7 @@ import time
 
 from .pdf_images import acquire_pdf_image
 from .image_preparation import projection_gaps, projection_mask, _partition_box
+from .restoration_classical import EXTRA_CLASSICAL, classical_parameters, extra_classical_variant
 
 
 IMAGE_DATASET_FORMAT = "vtm-image-dataset"
@@ -54,12 +55,16 @@ class ImageDatasetConfig:
             raise ValueError("Invalid projection thresholds")
         if (not isinstance(self.variants, list) or "original" not in self.variants
                 or len(set(self.variants)) != len(self.variants)
-                or set(self.variants)-{"original", "bicubic_x2", "clahe"}):
-            raise ValueError("variants require original; supported experiments: bicubic_x2, clahe. "
-                             "Denoising/SR need separate evidence and are not implemented")
-        if set(self.variant_options)-{"clahe"}:
-            raise ValueError("Only clahe accepts variant_options")
+                or set(self.variants)-{"original", "bicubic_x2", "bicubic_x4", "denoised", "clahe", *EXTRA_CLASSICAL}):
+            raise ValueError("variants require original and supported classical names")
+        if set(self.variant_options)-{"clahe", "denoised", *EXTRA_CLASSICAL}:
+            raise ValueError("Unknown variant_options")
         for name, options in self.variant_options.items():
+            if name in EXTRA_CLASSICAL:
+                classical_parameters(name, options)
+                continue
+            if name == 'denoised':
+                continue  # Conservative NLM limits are checked at transformation time.
             if set(options)-{"clip_limit", "tile_grid"}:
                 raise ValueError(f"Unknown {name} parameters")
             if not 0 < options.get("clip_limit", 1.5) <= 4 or not 2 <= options.get("tile_grid", 8) <= 32:
@@ -92,7 +97,7 @@ def dataset_code_signature():
         return IMAGE_DATASET_CODE_SIGNATURE
     root = Path(__file__).parent
     return dataset_hash({name: dataset_file_hash(root/name) for name in
-                         ("image_dataset.py", "image_preparation.py", "pdf_images.py")})
+                         ("image_dataset.py", "image_preparation.py", "pdf_images.py", "restoration_classical.py")})
 
 
 def dataset_environment():
@@ -297,11 +302,14 @@ def dataset_plan_layout(image, config, *, page=0):
 
 def dataset_variant(image, name, options):
     from PIL import Image
+    if name in EXTRA_CLASSICAL:
+        return extra_classical_variant(image, name, options)
     if name == "original":
         return image, {"method":"identity","parameters":{},"warnings":[]}
-    if name == "bicubic_x2":
-        return image.resize((image.width*2,image.height*2),Image.Resampling.BICUBIC), {
-            "method":"bicubic","parameters":{"scale":2},
+    if name in {"bicubic_x2", "bicubic_x4"}:
+        scale = 2 if name == 'bicubic_x2' else 4
+        return image.resize((image.width*scale,image.height*scale),Image.Resampling.BICUBIC), {
+            "method":"bicubic","parameters":{"scale":scale},
             "warnings":["experimental_interpolation; no_recovered_source_detail"]}
     if name == "clahe":
         try:
@@ -316,6 +324,19 @@ def dataset_variant(image, name, options):
         return Image.fromarray(cv2.cvtColor(lab,cv2.COLOR_LAB2RGB)), {
             "method":"clahe_lab_l","parameters":params,"opencv":cv2.__version__,
             "warnings":["experimental_contrast; inspect_weak_strokes"]}
+    if name == 'denoised':
+        import cv2
+        import numpy as np
+        defaults = {'h': 2., 'template_window': 7, 'search_window': 21}
+        params = {**defaults, **options}
+        if (set(options)-set(defaults) or not isinstance(params['h'], (int,float)) or not math.isfinite(params['h']) or not 0 < params['h'] <= 5 or
+                any(not isinstance(params[k], int) or params[k] % 2 != 1 for k in ('template_window', 'search_window')) or
+                not 3 <= params['template_window'] <= params['search_window'] <= 63):
+            raise ValueError('Conservative NLM requires 0<h<=5 and odd windows 3..63')
+        lab = cv2.cvtColor(np.asarray(image.convert('RGB')), cv2.COLOR_RGB2LAB)
+        lab[:, :, 0] = cv2.fastNlMeansDenoising(lab[:, :, 0], None, float(params['h']), params['template_window'], params['search_window'])
+        return Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)), dict(method='nlm_lab_l', parameters=params,
+            warnings=['may_remove_weak_strokes; opt_in_visual_review_required'])
     raise ValueError(f"Unsupported image variant: {name}")
 
 
@@ -553,7 +574,7 @@ def prepare_image_dataset(input_dir, output_dir, *, config=None, books=None, pag
                         for name in cfg.variants:
                             options = cfg.variant_options.get(name,{})
                             variant_environment = dict(environment)
-                            if name=="clahe":
+                            if name in {"clahe", "denoised", *EXTRA_CLASSICAL}:
                                 import cv2
                                 variant_environment["opencv"] = cv2.__version__
                             key = dataset_hash({"source":cached["source"]["sha256"],"box":geometry["source_box"],

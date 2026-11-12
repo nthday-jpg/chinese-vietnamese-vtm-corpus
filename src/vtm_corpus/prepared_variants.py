@@ -18,6 +18,14 @@ OCR_IMAGE_VARIANTS = {
     "tadisr_x4": (4, "neural_restoration"),
     "difftsr": (None, "neural_restoration"),
     "unihir_restoration": (1, "generative_reconstruction"),
+    **dict.fromkeys((
+        'grayscale_luma', 'grayscale_red', 'grayscale_green', 'grayscale_blue',
+        'lab_l', 'lab_a', 'lab_b', 'red_ink', 'background_normalized',
+        'sauvola', 'niblack', 'bilateral', 'unsharp'), (1, 'deterministic_transformation')),
+    **dict.fromkeys((
+        'docres_appearance', 'docres_deblurring', 'docres_deshadowing', 'docres_binarization',
+        'docdiff_deblurring', 'restormer_motion_deblurring', 'restormer_defocus_deblurring',
+        'restormer_real_denoising', 'restormer_gaussian_denoising'), (1, 'neural_restoration')),
 }
 
 RESTORATION_FAILURE_STATES = {
@@ -104,17 +112,14 @@ def variant_region_entry(root, descriptor, record, region, variant, *, index=Non
         raise VariantUnavailable([{"region": region["id"], "variant": variant, "state": "missing_variant"}])
     if row["state"] != "ok":
         raise VariantUnavailable([{k: row.get(k) for k in ("region_id", "variant", "state", "reason")}])
-    if variant in {"difftsr", "unihir_restoration"}:
+    if variant == "difftsr":
         review = report["configuration"].get("reviewed_regions", {}).get(
             f'{row["book"]}:{row["page"]}:{row["region_id"]}', {})
-        if variant == "difftsr":
-            box = region["source_box"]
-            ratio = (box[2]-box[0])/(box[3]-box[1])
-            if not (review.get("upright_horizontal_single_line") and review.get("allow_simplified_text_prior")
-                    and 1 <= review.get("character_count", 0) <= 24 and abs(ratio/4-1) <= .05):
-                raise ValueError("DiffTSR applicability metadata/input contract unverified")
-        elif not (review.get("damaged_inscription") and report["configuration"].get("accept_unihir_noncommercial")):
-            raise ValueError("UniHIR applicability metadata unverified")
+        box = region["source_box"]
+        ratio = (box[2]-box[0])/(box[3]-box[1])
+        if not (review.get("upright_horizontal_single_line") and review.get("allow_simplified_text_prior")
+                and 1 <= review.get("character_count", 0) <= 24 and abs(ratio/4-1) <= .05):
+            raise ValueError("DiffTSR applicability metadata/input contract unverified")
     image = dataset_load_image(root, row["image"])
     box = region["source_box"]
     scale = OCR_IMAGE_VARIANTS[variant][0]

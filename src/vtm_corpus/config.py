@@ -113,8 +113,8 @@ class OCRConfig:
             raise ValueError("segmentation_args must be a dictionary")
         if self.image_crop_type not in {"page", "group", "column", "native"}:
             raise ValueError("image_crop_type must be page, group, column or native")
-        if self.image_variant not in {"original", "clahe", "bicubic_x2", "bicubic_x4", "denoised",
-                                      "realesrgan_x4", "tadisr_x4", "difftsr", "unihir_restoration"}:
+        from .prepared_variants import OCR_IMAGE_VARIANTS
+        if self.image_variant not in OCR_IMAGE_VARIANTS:
             raise ValueError("Unsupported image_variant")
         if self.image_variant in {"difftsr", "unihir_restoration"} and not self.allow_generated_variants:
             raise ValueError("Generated-content variants require allow_generated_variants=True")
