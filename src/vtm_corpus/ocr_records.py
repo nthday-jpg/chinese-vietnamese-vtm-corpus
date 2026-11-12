@@ -15,6 +15,39 @@ def read_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
+def checkpoint_reference(anchor, reference):
+    """Resolve a copied campaign tree without changing its stored provenance."""
+    anchor = Path(anchor).resolve().parent
+    normalized = str(reference).replace('\\', '/')
+    path = Path(normalized)
+    if not path.is_absolute() and ':' not in normalized:
+        candidate = (anchor/path).resolve()
+        if not candidate.is_relative_to(anchor):
+            raise ValueError('Relative checkpoint reference escapes campaign root')
+        return candidate
+    # Prefer the mounted copy even when the previous session still exists.
+    parts = normalized.split('/')
+    suffixes = [parts[i:] for i, value in enumerate(parts) if value in {'variant_runs', 'runs'}]
+    suffixes.append(parts[-1:])
+    for suffix in suffixes:
+        local = anchor.joinpath(*suffix)
+        if local.exists():
+            return local
+    return path
+
+
+def read_checkpoint_campaign(path):
+    path = Path(path)
+    campaign = read_json(path)
+    if campaign.get('variant_manifests'):
+        campaign['variant_manifests'] = {v: str(checkpoint_reference(path, ref))
+            for v, ref in campaign['variant_manifests'].items()}
+    for pair in campaign.get('pairs', []):
+        for engine in campaign['models']:
+            pair[engine] = str(checkpoint_reference(path, pair[engine]))
+    return campaign
+
+
 def read_jsonl(path: Path, *, allow_incomplete_tail: bool = False) -> list[dict]:
     rows = []
     lines = path.read_text(encoding="utf-8-sig").splitlines(keepends=True)

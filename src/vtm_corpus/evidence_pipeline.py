@@ -10,10 +10,11 @@ from .corpus_ocr import prepare_multi_corpus, write_json
 from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path
 from .prepared_variants import OCR_IMAGE_VARIANTS, variant_region_entry
 from .multi_compare import compare_multi_corpus
-from .ocr_records import load_run
+from .ocr_records import load_run, read_checkpoint_campaign
 from .pdf_images import acquire_pdf_image
 from .spatial_coverage import analyze_spatial_coverage, spatial_settings
 from .variant_stability import analyze_variant_stability, stability_settings
+from .restoration_evaluation import evaluate_restoration_page, restoration_evaluation_settings
 
 
 def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, cache_renders=True):
@@ -170,11 +171,16 @@ def variant_difference_artifacts(image, stability, manifests_by_variant, row, di
 
 
 def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable_spatial=False,
-                             spatial_options=None, stability_options=None, **comparison_options):
+                             spatial_options=None, stability_options=None, enable_restoration_ablation=False,
+                             enable_visual_fidelity=False, restoration_options=None, prepared_dataset=None,
+                             evidence_dir=None, **comparison_options):
     manifest_path = Path(manifest_path)
-    campaign = json.loads(manifest_path.read_text(encoding='utf8'))
+    campaign = read_checkpoint_campaign(manifest_path)
     p = stability_settings(stability_options)
     spatial_settings(spatial_options)
+    restoration_evaluation_settings(restoration_options)
+    if (enable_restoration_ablation or enable_visual_fidelity) and not enable_multi_variant:
+        raise ValueError('Restoration evaluation requires an existing multi-variant campaign')
     if enable_multi_variant:
         if campaign.get('schema') != 'vtm-multi-variant-campaign-v1':
             raise ValueError('Multi-variant comparison requires multi_variant_manifest.json')
@@ -184,11 +190,19 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
     else:
         paths = {'original': str(manifest_path)}
     results = {v: compare_multi_corpus(path, **comparison_options) for v, path in paths.items()}
+    if prepared_dataset:
+        # Read-only relocation for evaluation. Raw run manifests/checkpoints stay intact.
+        root, descriptor = dataset_open(prepared_dataset)
+        for res in results.values():
+            for manifests in res['manifests'].values():
+                for manifest in manifests.values():
+                    manifest['config'] = {**manifest['config'], 'image_dataset': str(root/f"snapshots/{descriptor['snapshot_id']}.json"),
+                        'image_dataset_key': descriptor['snapshot_id']}
     reference = p['reference_variant'] if enable_multi_variant else 'original'
     result = results[reference]
     loaded, states = {}, {}
     for v, path in paths.items():
-        child = json.loads(Path(path).read_text(encoding='utf8'))
+        child = read_checkpoint_campaign(path)
         loaded[v], states[v] = {}, {}
         for pair in child['pairs']:
             loaded[v][pair['book']], states[v][pair['book']] = {}, {}
@@ -206,7 +220,8 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
         book, page = row['book'], row['page']-1
         records = {v: {e: run['records'].get((book, page)) for e, run in books[book].items()}
                    for v, books in loaded.items()}
-        directory = manifest_path.parent/'evidence'/hashlib.sha256(book.encode()).hexdigest()[:12]/f'p{page+1:05d}'
+        artifact_root = Path(evidence_dir) if evidence_dir else manifest_path.parent/'evidence'
+        directory = artifact_root/hashlib.sha256(book.encode()).hexdigest()[:12]/f'p{page+1:05d}'
         if enable_multi_variant:
             row['variant_stability'] = analyze_variant_stability(records, result['models'], options=p,
                 input_states={v: {e: pages.get(page) for e, pages in books[book].items()} for v, books in states.items()})
@@ -216,6 +231,22 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
             if p['compare_across_engines']:
                 row['variant_consensus'] = {v: next(r for r in res['rows'] if r['book'] == book and r['page'] == page+1)
                                           for v, res in results.items() if v != reference}
+        if enable_restoration_ablation or enable_visual_fidelity:
+            source_info = next(iter(result['manifests'][book].values())).get('books', {}).get(book, {})
+            # Saved source hashes permit offline evaluation without re-reading PDF pixels.
+            # Legacy caches without established provenance remain explicitly unverified.
+            source_sha = source_info.get('sha256') if not source_info.get('legacy_source_unverified') else None
+            try:
+                row['restoration_evaluation'] = evaluate_restoration_page(records,
+                    {v: res['manifests'][book] for v, res in results.items()}, result['models'],
+                    book=book, page=page+1, source_sha256=source_sha,
+                    input_states={v: {e: pages.get(page) for e, pages in books[book].items()} for v, books in states.items()},
+                    options=restoration_options, stability_options=p,
+                    reading_order=comparison_options.get('reading_order', 'auto'), enable_visual=enable_visual_fidelity)
+            except (OSError, ValueError, KeyError, ImportError) as exc:
+                row['restoration_evaluation'] = {'schema': 'vtm-restoration-evaluation-v1',
+                    'status': 'analysis_incomplete', 'complete': False, 'reason': str(exc),
+                    'regions': [], 'review_cases': []}
         if not enable_spatial and not (enable_multi_variant and p['save_difference_crops']):
             continue
         try:
@@ -258,6 +289,17 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
                           or stability['summary']['unresolved_alignments']):
             row['reasons'].append('variant_stability_review')
         if row['reasons']:
+            row['route'] = 'review_page'
+        restoration = row.get('restoration_evaluation')
+        if restoration and (not restoration.get('complete') or not restoration.get('input_complete') or any(
+                pair.get('exact_agreement') is False or pair.get('status') in {
+                    'ineligible_pair', 'inference_configuration_mismatch', 'processor_runtime_identity_mismatch',
+                    'ambiguous_alignment', 'analysis_incomplete'}
+                for region in restoration['regions'] for pair in region['comparisons']) or any(
+                v.get('visual_fidelity', {}).get('warnings') or (v.get('visual_fidelity') and
+                    v['visual_fidelity']['status'] != 'measured') for region in restoration['regions']
+                for v in region['variants'].values())):
+            row['reasons'].append('restoration_evaluation_review')
             row['route'] = 'review_page'
     if enable_multi_variant:
         summaries = [r['variant_stability']['summary'] for r in result['rows']]

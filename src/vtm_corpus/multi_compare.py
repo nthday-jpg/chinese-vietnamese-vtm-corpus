@@ -5,25 +5,35 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .character_regions import attach_character_regions, attach_conflict_regions
-from .ocr_records import read_json, load_run, check_sources
+from .ocr_records import read_json, load_run, check_sources, read_checkpoint_campaign
 from .multi_consensus import multi_character_consensus
 from .ocr_quality import page_quality_issues
 from .page_consensus import page_level_consensus, page_consensus_exclusions, page_consensus_summary
 
 
 def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review_threshold=.05,
-                         reading_order="auto", page_consensus=True, page_consensus_options=None) -> dict:
+                         reading_order="auto", page_consensus=True, page_consensus_options=None,
+                         source_dir=None) -> dict:
     if not 0 <= review_threshold <= 1:
         raise ValueError("review_threshold must be between 0 and 1")
     if reading_order not in {"auto", "vertical_rtl", "detection"}:
         raise ValueError("reading_order must be auto, vertical_rtl or detection")
-    campaign = read_json(Path(manifest_path))
+    campaign = read_checkpoint_campaign(manifest_path)
     models = campaign["models"]
     if len(models) < 2 or len(set(models)) != len(models):
         raise ValueError("Campaign must name at least two distinct models")
     rows, warnings, configs, seen, digest_cache = [], [], {}, set(), {}
     for pair in campaign["pairs"]:
         runs = {name: load_run(Path(pair[name]), name, warnings, reading_order=reading_order) for name in models}
+        if source_dir:
+            for run in runs.values():
+                for info in run['manifest'].get('books', {}).values():
+                    filename = str(info.get('src', '')).replace('\\', '/').rsplit('/', 1)[-1]
+                    candidates = list(Path(source_dir).rglob(filename)) if filename else []
+                    if len(candidates) > 1:
+                        raise ValueError('Ambiguous relocated source PDF: '+filename)
+                    if candidates:
+                        info['src'] = str(candidates[0].resolve())
         first = runs[models[0]]
         source_checks = [check_sources(first, runs[name], warnings, digest_cache=digest_cache) for name in models[1:]]
         verified = {check["book"]: all(

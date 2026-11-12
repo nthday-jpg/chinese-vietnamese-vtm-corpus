@@ -1,25 +1,20 @@
 # Luồng xử lý
 
-Xem [tài liệu đầy đủ](docs/README.md) để biết cấu hình, hợp đồng dữ liệu và giới hạn.
+PDF gốc → ảnh canonical tùy chọn → từng OCR chạy tuần tự → checkpoint →
+đối chiếu/báo cáo → người đọc chọn bản Hán → dịch tiếng Việt.
 
-1. **Kiểm tra môi trường** bằng notebook 0 khi runtime Kaggle thay đổi. Gắn các
-   Dataset packages/models/PDF thực tế; xác minh ABI và GPU trước inference.
-2. **Chuẩn bị ảnh tùy chọn** bằng notebook 1 trong phiên riêng: lấy ảnh nguồn đã
-   kiểm chứng, canonical page/group/column, biến thể và provenance. Giữ PDF gốc,
-   immutable snapshot, manifest và object; không cần chạy notebook 1 cùng phiên OCR.
-3. **OCR** bằng notebook 3: chọn cùng sách/trang/crop; một engine trong một worker
-   xử lý các trang/biến thể hợp lệ rồi thoát. Từng trang thành công có checkpoint.
-   Luồng render PDF cũ vẫn dùng được khi không cấu hình prepared images.
-4. **Thu thập bằng chứng**: Spatial Coverage tạo ứng viên từ ảnh gốc độc lập;
-   Page-Level Consensus đối chiếu cấu trúc đầu ra; Character-Level Consensus giữ
-   đa số nghiêm ngặt 3/4; Variant Stability so trong từng engine. Biến thể không
-   được cộng thành phiếu model độc lập. Thiếu geometry hoặc alignment mơ hồ giữ
-   chưa xác định. Không tự sửa phồn thể/dị thể hay dùng LLM viết lại OCR.
-5. **Rà soát** HTML offline, raw text, source-coordinate crop và các phương án.
-   Người đọc chọn bản Hán để dịch; đồng thuận/overlap/stability không chứng minh
-   reading đúng và không thay ground truth.
-6. **Dịch** bằng notebook 2: TXT đã chọn → chia đoạn → prompt/model dịch → ghép
-   TXT Việt. Đoạn thiếu/token-limit giữ cảnh báo. Chưa xác nhận notebook 2 offline.
+Xem [sơ đồ và cơ chế đã triển khai](docs/pipeline.md). Coverage tìm ứng viên từ
+ảnh nguồn; consensus so các OCR; stability so biến thể trong từng engine.
+Chúng hỗ trợ rà soát, không chứng minh bản chép đúng.
 
-Bắt đầu một sách/một trang. Giữ `WORK_DIR` và cấu hình để resume, hoặc dùng
-`RUN_OCR=False` phân tích checkpoint. Không cần nạp model khi chỉ xem bằng chứng.
+[Hướng dẫn vận hành](docs/usage.md) mô tả thứ tự notebook 0 → 1 (tùy chọn, phiên
+riêng) → 3 → 2, chạy mẫu nhỏ, đọc checkpoint và runtime offline. Mặc định notebook
+3 chọn một PDF/một trang để smoke. Giữ nguồn,
+manifest, checkpoint và các phương án chưa phân định; người đọc chuẩn bị TXT
+đã chọn cho dịch. Workflow dịch hiện chưa xác nhận hoàn toàn offline.
+
+Các hướng chưa triển khai được tách trong [giả thuyết nghiên cứu](docs/hypotheses.md).
+
+Kiến trúc hiện tại: Notebook 1 tạo immutable Kaggle Dataset; Notebook 3 dùng lại
+ảnh và raw checkpoint trong phiên độc lập. Restoration Ablation và Visual
+Fidelity đã có mã và test CPU, xem [pipeline](docs/pipeline.md).

@@ -20,6 +20,11 @@ OCR_IMAGE_VARIANTS = {
     "unihir_restoration": (1, "generative_reconstruction"),
 }
 
+RESTORATION_FAILURE_STATES = {
+    'failed', 'missing_assets', 'runtime_incompatible', 'inference_failed',
+    'timeout', 'resource_exceeded',
+}
+
 
 class VariantUnavailable(ValueError):
     def __init__(self, states):
@@ -48,7 +53,7 @@ def restoration_index(root, descriptor):
             raise ValueError("Duplicate/invalid restoration region identity")
         rows[key] = row
         state = row.get("state")
-        if state not in {"ok", "not_applicable", "failed", "missing_assets", "skipped_by_configuration"}:
+        if state not in {"ok", "not_applicable", "skipped_by_configuration"} | RESTORATION_FAILURE_STATES:
             raise ValueError("Invalid restoration variant state")
         counts[state] = counts.get(state, 0) + 1
     expected = set()
@@ -75,7 +80,7 @@ def restoration_index(root, descriptor):
                     raise ValueError('Restoration original row differs from canonical pixels')
     if set(rows) != expected or counts != report["states"]:
         raise ValueError("Restoration manifest inventory mismatch")
-    if (counts.get("failed", 0) or counts.get("missing_assets", 0)) and not report.get("partial"):
+    if any(counts.get(s, 0) for s in RESTORATION_FAILURE_STATES) and not report.get("partial"):
         raise ValueError("Failed restoration falsely labelled complete")
     if bool(ext.get('partial')) != bool(report.get('partial')):
         raise ValueError('Restoration extension partial status mismatch')
@@ -158,12 +163,22 @@ def bind_restoration_variant(cfg, root, descriptor, source_sha, pages, *, allow_
         if page["source_sha256"] != source_sha:
             continue
         record = dataset_page(root, descriptor, source_sha, page["page"])
-        dataset_validate_page(root, record)
+        layout = dataset_validate_page(root, record)
+        if layout['reading_direction'] != cfg.reading_direction:
+            raise ValueError('Dataset and OCR reading directions differ')
         try:
             resolved = resolve_variant_page(root, descriptor, record, cfg, index=index, report=report)
             kind = "page" if cfg.image_crop_type == "native" else cfg.image_crop_type
             assets = [{"region": r["id"], "box": r["source_box"], "order": r["reading_order"],
                        "image": r["images"][cfg.image_variant]} for r in resolved["regions"] if r["crop_type"] == kind]
+            if not assets:
+                raise ValueError('Prepared crop type contains no regions')
+            # Metadata such as wall time, cache receipts and old filesystem
+            # locations is not input to OCR and must not invalidate its output.
+            for asset in assets:
+                asset['image'] = {k: v for k, v in asset['image'].items() if k in {
+                    'sha256', 'pixel_sha256', 'size', 'mode', 'image_to_source',
+                    'provenance', 'model_identity', 'operation', 'coordinate_mapping_evidence'}}
             identity.append({"page": page["page"], "source": record["source"], "assets": assets})
             states[page["page"]] = {"state": "ok"}
         except VariantUnavailable as exc:

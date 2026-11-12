@@ -221,6 +221,32 @@ def _page_geometry(extra, box, input_size, offset, region_index):
     return extra
 
 
+def processor_identity(backend, engine):
+    """Observe software and processor config without importing/loading models."""
+    from importlib import metadata
+    packages = {}
+    names = (('paddleocr', 'paddlepaddle-gpu', 'paddlex') if engine in {'paddle', 'ppocr'}
+             else ('torch', 'transformers', 'mmcv-full', 'mmdet', 'mmrotate') if engine == 'tonggu'
+             else ('torch', 'transformers'))
+    for name in names:
+        try:
+            packages[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+    proc = getattr(backend, 'proc', None)
+    info = {'backend': type(backend).__module__+'.'+type(backend).__qualname__, 'packages': packages,
+            'observation': 'native_processor_internals_unobserved' if proc is None else 'observed'}
+    if proc is not None:
+        info['processor'] = type(proc).__module__+'.'+type(proc).__qualname__
+        image_processor = getattr(proc, 'image_processor', None)
+        try:
+            import json
+            info['image_processor'] = json.loads(json.dumps(image_processor.to_dict(), default=str))
+        except (AttributeError, TypeError, ValueError):
+            info['observation'] = 'processor_config_unobserved'
+    return info
+
+
 def run_prepared_page(backend, image, image_path, cfg, *, page=0):
     """Run all regions transactionally; partial region text never becomes a page."""
     import tempfile
@@ -270,10 +296,13 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
             crop, meta = prepare_region(image, box, cfg, native=native)
         path = directory / f"region_{i:03d}.png"
         crop.save(path, format="PNG")
+        import time
+        ocr_started = time.monotonic()
         try:
             text, extra = backend.run(str(path))
         finally:
             path.unlink(missing_ok=True)
+        meta['ocr_seconds'] = round(time.monotonic()-ocr_started, 6)
         observed = extra.get("model_input", {}).get("processed_sizes_wh", [])
         if len(observed) == 1:
             actual_w, actual_h = observed[0]
@@ -308,6 +337,7 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
     if any(rec.get("variant_downsampled") for rec in records):
         layout["warnings"].append("backend_variant_downsampled; inspect selected variant and input budget")
     observation = {"page_size": list(image.size), "render": image.info.get("render", {}),
+                   "processor_identity": processor_identity(backend, cfg.engine),
                    "layout": layout, "regions": records,
                    "model_min_pixels": cfg.model_min_pixels, "model_max_pixels": cfg.model_max_pixels,
                    "processor_observation": "see region raw.model_input; native internal tensors may be unavailable"}

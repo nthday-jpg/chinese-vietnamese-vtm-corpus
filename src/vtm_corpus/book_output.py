@@ -12,10 +12,11 @@ import zipfile
 
 from .character_regions import character_crops
 from .corpus_ocr import now, write_json
-from .ocr_records import load_run, read_jsonl
+from .ocr_records import load_run, read_jsonl, read_checkpoint_campaign
 from .ocr_worker import render
 from .page_consensus import page_consensus_summary, page_structure_overview
-from .evidence_report import portable_evidence, book_spatial_coverage, book_variant_stability, EVIDENCE_JS
+from .evidence_report import (portable_evidence, book_spatial_coverage, book_variant_stability,
+                              book_restoration_evaluation, EVIDENCE_JS)
 
 
 BOOK_OUTPUT_FORMAT = 'vtm-ocr-book-v1'
@@ -32,6 +33,10 @@ button{cursor:pointer}button[aria-selected=true]{background:var(--accent);color:
 .predictions{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.prediction{background:#f2f6f7;padding:10px;overflow-wrap:anywhere}
 .images{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}.images figure{margin:0;max-width:100%}img{max-width:100%;height:auto;border:1px solid var(--line)}figcaption{color:var(--muted);font-size:14px}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;background:#e4f4ed}.bad{background:#fff0d9}.status{font-weight:600}
+[data-restoration-review] .images{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr))}
+[data-restoration-review] .images img{width:100%}
+[data-restoration-review] select,[data-restoration-review] textarea{font:inherit;padding:8px;max-width:100%}
+[data-restoration-review] label{display:block;margin:8px 0}
 @media(max-width:600px){main{padding:10px}header,section,.card{padding:14px}th,td{padding:6px}}
 '''
 BOOK_JS = '''
@@ -166,7 +171,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     if not rows:
         raise ValueError(f'Book has no selected pages: {book}')
     campaign_path = Path(result['corpus_manifest'])
-    campaign = json.loads(campaign_path.read_text(encoding='utf-8'))
+    campaign = read_checkpoint_campaign(campaign_path)
     pair = next(pair for pair in campaign['pairs'] if pair['book'] == book)
     models = result['models']
     warnings, runs, errors, generated = [], {}, [], set()
@@ -246,7 +251,9 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         body += '<div id="page-consensus">'+book_page_consensus(diagnostic)+'</div>'
         spatial = portable_evidence(row.get('spatial_coverage'), directory, page, generated)
         stability = portable_evidence(row.get('variant_stability'), directory, page, generated)
+        restoration = portable_evidence(row.get('restoration_evaluation'), directory, page, generated)
         body += book_spatial_coverage(spatial) + book_variant_stability(stability)
+        body += book_restoration_evaluation(restoration, page)
         body += '<section id="character-consensus"><h2>Vùng bất đồng</h2>'
         regions = []
         for region in consensus.get('conflict_regions', []):
@@ -295,7 +302,8 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             'excluded_models': consensus.get('excluded_models', {}), 'reading_order': row.get('reading_order', {}),
             'page_consensus': diagnostic,
             **({'evidence_schema': result['evidence_schema'], 'spatial_coverage': spatial,
-                'variant_stability': stability, 'variant_consensus': row.get('variant_consensus')} if result.get('evidence_schema') else {}),
+                'variant_stability': stability, 'variant_consensus': row.get('variant_consensus'),
+                'restoration_evaluation': restoration} if result.get('evidence_schema') else {}),
             'alignment': consensus.get('alignment'), 'line_alignment': consensus.get('line_alignment', {}),
             'pairwise_distances': consensus['pairwise_distances'], 'conflicts': consensus['conflicts'],
             'regions': regions}, ensure_ascii=False))
@@ -360,4 +368,4 @@ def export_corpus_results(result, output_dir, *, include_crops=True, create_zip=
 
 
 def read_jsonl_campaign(path):
-    return json.loads(Path(path).read_text(encoding='utf8'))['pairs']
+    return read_checkpoint_campaign(path)['pairs']

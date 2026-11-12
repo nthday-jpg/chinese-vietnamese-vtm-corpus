@@ -67,6 +67,7 @@ class OCRConfig:
     dtype: str = "fp16"                     # fp32 | fp16 | bf16 (hunyuan)
     model: str = "tencent/HunyuanOCR"
     model_revision: str = ""               # HF revision/commit; included in cache identity
+    ocr_algorithm_version: str = "prepared-ocr-v1"  # bump only for changes to raw inference
     prompt: str = ""                        # "" = HUNYUAN_PROMPT
     repetition_penalty: float = 1.08
     device: str = "auto"                    # auto | cpu | cuda | cuda:1
@@ -130,6 +131,8 @@ class OCRConfig:
             exclude.add("image_content_key")
         else:
             exclude.update({"image_dataset", "image_dataset_key"})
+        if self.ocr_algorithm_version == 'prepared-ocr-v1':
+            exclude.add('ocr_algorithm_version')  # legacy raw checkpoint compatibility
         if not self.allow_generated_variants or self.image_variant not in {'difftsr', 'unihir_restoration'}:
             exclude.add("allow_generated_variants")
         # Preserve legacy checkpoint hashes when the prepared input is disabled.

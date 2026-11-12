@@ -162,7 +162,15 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                 if prior_manifest.is_file() and prior_dir.resolve().is_relative_to(workdir):
                     cached = json.loads(prior_manifest.read_text(encoding='utf-8'))
                     source_info = cached.get('books', {}).get(book, {})
-                    if (corpus_model_key(cached['config']) == corpus_model_key(cfg)
+                    # Legacy prepared checkpoints have snapshot identity but
+                    # no content key. Reuse only the exact same verified snapshot.
+                    legacy = OCRConfig(**cfg.to_dict())
+                    legacy.image_content_key = ''
+                    same_legacy_snapshot = (not cached['config'].get('image_content_key')
+                        and cached['config'].get('image_dataset_key') == cfg.image_dataset_key
+                        and bool(cfg.image_dataset_key)
+                        and corpus_model_key(cached['config']) == corpus_model_key(legacy))
+                    if ((corpus_model_key(cached['config']) == corpus_model_key(cfg) or same_legacy_snapshot)
                             and source_info.get('src') == str(Path(entry['path']).resolve())
                             and source_info.get('sha256', source_sha) == source_sha):
                         directory = prior_dir

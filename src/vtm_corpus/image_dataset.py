@@ -421,7 +421,11 @@ def bind_image_dataset(cfg, source_sha, pages, *, allow_unavailable=False):
             if region["crop_type"]==kind and cfg.image_variant not in region["images"]:
                 raise ValueError(f"Missing variant {cfg.image_variant} for {region['id']}")
         states[page] = {"state": "ok"}
-    return states
+    # Content, rather than the dataset's mount point or unrelated variants,
+    # determines raw OCR reuse. Extension variants already use this contract.
+    from .prepared_variants import bind_restoration_variant
+    return bind_restoration_variant(cfg, root, descriptor, source_sha, pages,
+                                    allow_unavailable=allow_unavailable or cfg.image_dataset_fallback)
 
 
 def dataset_ocr_page(cfg, source_sha, page):
@@ -432,6 +436,8 @@ def dataset_ocr_page(cfg, source_sha, page):
     record = dataset_page(root,descriptor,source_sha,page)
     if record is None:
         if cfg.image_dataset_fallback:
+            if cfg.image_variant != 'original':
+                raise ValueError('Missing prepared variant cannot fall back to original PDF pixels')
             return None
         raise ValueError(f"Prepared dataset missing page {page+1}")
     layout = dataset_validate_page(root,record,check_pixels=False)
@@ -452,7 +458,7 @@ def dataset_ocr_page(cfg, source_sha, page):
 
 
 def prepare_image_dataset(input_dir, output_dir, *, config=None, books=None, pages="1-2",
-                          limit=2, max_books=1, profile_dir=None):
+                          limit=2, max_books=1, profile_dir=None, publish=True):
     """Prepare a bounded selection; repeat the same command to resume.
 
     A completed source/layout/variant is independently reusable. Only after QC
@@ -604,7 +610,8 @@ def prepare_image_dataset(input_dir, output_dir, *, config=None, books=None, pag
         dataset_write(root,snapshot,data)
         # Publish last: a crash/failure before this point leaves the last usable
         # snapshot untouched and all finished stages available for resume.
-        dataset_write(root,"dataset.json",data)
+        if publish:
+            dataset_write(root,"dataset.json",data)
     stats.update(snapshot_id=descriptor["snapshot_id"],dataset=str(root/snapshot),
                  seconds=round(time.monotonic()-started,3),manifest_rows=len(manifest_rows))
     return stats
@@ -612,6 +619,9 @@ def prepare_image_dataset(input_dir, output_dir, *, config=None, books=None, pag
 
 def validate_image_dataset(directory):
     root, descriptor = dataset_open(directory)
+    snapshot = root/f"snapshots/{descriptor['snapshot_id']}.json"
+    if not snapshot.is_file() or dataset_open(snapshot)[1] != descriptor:
+        raise ValueError('Immutable dataset snapshot missing or mismatched')
     dataset_read(root,descriptor["manifest"])
     actual = [[e["book"],e["source_sha256"],e["page"]] for e in descriptor["pages"]]
     if actual != descriptor["expected_pages"] or len(set(map(tuple,actual))) != len(actual):
@@ -623,8 +633,32 @@ def validate_image_dataset(directory):
         warnings.extend(f"{entry['book']}/p{entry['page']+1}: {w}" for w in layout["warnings"])
         warnings.extend(f"{entry['book']}/p{entry['page']+1}/x{c['source_x']}: {w}"
                         for c in layout["cuts"] for w in c["warnings"])
+    if descriptor.get('restoration'):
+        validate_restoration_dataset(root, descriptor)
     return {"pages":len(actual),"snapshot_id":descriptor["snapshot_id"],"warnings":warnings,
+            "partial": bool(descriptor.get('restoration', {}).get('partial')),
             "geometric_coverage":1.0,"ocr_text_coverage":"unverified"}
+
+
+def validate_restoration_dataset(root, descriptor):
+    """Check every extension asset, including rows not selected for OCR."""
+    from .prepared_variants import restoration_index, variant_region_entry
+    index, report = restoration_index(root, descriptor)
+    for page in descriptor['pages']:
+        record = dataset_page(root, descriptor, page['source_sha256'], page['page'])
+        for region in record['regions']:
+            for variant in report['selected_variants']:
+                row = index[(page['source_sha256'], page['page'], region['id'], variant)]
+                if row['state'] != 'ok':
+                    continue
+                if variant == 'tadisr_text_mask':
+                    dataset_load_image(root, row['image']).close()
+                else:
+                    variant_region_entry(root, descriptor, record, region, variant,
+                                         index=index, report=report, allow_generated=True)
+                for extra in row.get('extras', {}).values():
+                    dataset_read(root, extra)
+    return index, report
 
 
 def package_image_dataset(directory, archive):
@@ -643,6 +677,13 @@ def package_image_dataset(directory, archive):
         layout = json.loads(dataset_read(root,record["layout"]))
         references.update(layout[k]["path"] for k in ("analysis_mask","preview"))
         references.update(v["path"] for r in record["regions"] for v in r["images"].values())
+    if descriptor.get('restoration'):
+        index, report = validate_restoration_dataset(root, descriptor)
+        references.update((descriptor['restoration']['report']['path'], report['manifest']['path']))
+        for row in index.values():
+            if row.get('image'):
+                references.add(row['image']['path'])
+            references.update(ref['path'] for ref in row.get('extras', {}).values())
     archive.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(archive,"x",compression=zipfile.ZIP_STORED,allowZip64=True) as output:
         # Fixed timestamps/order make packages reproducible across machines.
