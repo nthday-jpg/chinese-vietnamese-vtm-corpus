@@ -15,6 +15,12 @@ coverage, stability, giấy phép, kiểm chứng và xử lý sự cố.
 | [3 — OCR và rà soát](3_so_sanh_so_chu_ocr.ipynb) | TongGuOCR, PP-OCRv6-medium, PaddleOCR-VL-1.6, HunyuanOCR-1.5; đồng thuận và báo cáo offline. |
 | [2 — dịch Hán–Việt](2_dich_han_viet.ipynb) | Dịch TXT đã rà soát; workflow hiện tại vẫn cần chuẩn bị repo/model qua mạng. |
 
+Notebook 1 nén dữ liệu mã upstream bằng zlib/Base85 để giữ file dưới 1 MB.
+Ô mã upstream tự giải nén và kiểm SHA-256, giữ nguyên từng file và license;
+chạy offline không cần thêm Dataset mã nguồn. Sau khi cập nhật phần mã nhúng,
+chạy `uv run --no-project python tools/compact_image_notebook.py`;
+thêm `--check` để kiểm dung lượng và checksum mà không ghi file.
+
 Trong notebook 3, điền `PACKAGES_DIR`, `MODELS_DIR`, `DATA_DIR`. Khởi đầu bằng
 `BOOKS=["1"]`, `MAX_BOOKS=1`, `PAGES="1"`, `LIMIT=1`. Hai tính năng mới mặc định tắt:
 

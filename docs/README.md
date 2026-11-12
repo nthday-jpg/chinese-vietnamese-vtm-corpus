@@ -248,7 +248,10 @@ license của toàn bộ asset từ license wrapper. Không đưa binary hoặc 
 
 Kiểm kê SHA-256 ngày 11/11/2026 xác nhận 53 file model OCR, các asset đã ghi của
 Real-ESRGAN/TADiSR/DiffTSR/UniHIR, 5972 payload packages OCR và 13 wheel TADiSR
-đều khớp manifest local. Checkpoint chính UniHIR 29.302.764.504 byte vẫn thiếu.
+đều khớp manifest local. Kiểm tra lại sau khi tải xong: checkpoint chính UniHIR
+29.302.764.504 byte đã đủ và khớp SHA-256 upstream. Tổng 6.090 file được kiểm
+hash, khoảng 74,76 GiB; không còn file `.part` hoặc dependency thiếu theo báo cáo
+Kaggle đã cung cấp. Báo cáo mới: `work/offline_assets_latest_audit.json`.
 Không cần tải checkpoint này cho classical, Real-ESRGAN, TADiSR hoặc notebook 3.
 Nếu cần thử riêng UniHIR, script sau chỉ tải khi có `--download`:
 

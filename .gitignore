@@ -16,4 +16,5 @@ configs/
 tests/
 scripts/
 kaggle_upload/
-tools/
+tools/*
+!tools/compact_image_notebook.py
