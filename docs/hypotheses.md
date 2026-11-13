@@ -1,5 +1,35 @@
 # Các giả thuyết nghiên cứu
 
+## Cơ chế CPU bổ sung sau khảo sát ảnh thật
+
+[Báo cáo khả thi](../reports/restoration_feasibility.md) có hồ sơ architecture,
+inductive bias, miền checkpoint, tương thích hướng, cost và quyết định cho mọi
+phương pháp cũ/mới. Những giả thuyết mới đã có variant độc lập, chưa có OCR mới:
+
+| Variant | Bias/cơ chế | Điều kiện và nguy cơ |
+|---|---|---|
+| `retinex_msr`, `retinex_msrcp` | Log ảnh trừ Gaussian ở ba scale; CP dùng cùng gain RGB | G1 nền biến thiên; halo và noise tăng; không tái tạo nét mất |
+| `wolf`, `nick` | Local moments; Wolf chuẩn hóa contrast toàn input, NICK dùng second moment | Ngưỡng thay theo crop/viền; có thể xóa/nối nét; mất màu |
+| `color_pca`, `color_gmm` | Phương sai màu hoặc Gaussian mixtures không nhãn | Trục/cụm không nhất thiết là chữ; GMM cụm giấy có thể trùng, chỉ conditional |
+| `mean_shift` | Mode trong lân cận không gian/màu | Có thể gộp nét; không dùng pyramid tự thu nhỏ |
+| `anisotropic_diffusion` | Gradient lớn chặn diffusion, bốn láng giềng | Nét yếu vẫn bị xóa; không tự nối nét đứt |
+| `background_morphological` | Valley chữ tối nhỏ hơn kernel, closing chỉ estimate nền | Chữ to/khung G3 có thể lẫn nền; không closing glyph output |
+| `background_guided` | Local linear smoothing trên surface nền đã estimate | Giữ biên nền lớn; scale sai vẫn làm mất nét |
+| `background_otsu` | Hypothesis riêng: closing surface → chia L → Otsu | Sau chuẩn hóa mới giả định histogram hai lớp; không phải Gatos/MRF đầy đủ |
+
+Ngày 13/11/2026: DocEnTR đã có weights base/8, source và closure cp313. DE-GAN
+đã có đủ weights ba task, dùng nguyên generator qua Keras 3 backend Torch,
+không cài TensorFlow 1.x/training dependencies để thay kernel. DocEnTR học pixel
+reconstruction theo patch/positional embedding; DE-GAN học prior foreground/
+clean appearance từ cGAN, có thể xóa nét nhạt hoặc dấu đỏ thật. Watermark task
+cần duyệt vùng. Cả hai thuộc nhóm neural sensitivity; chưa có inference GPU.
+
+LWTformer chưa xác nhận weights phát hành; GLADUnet chưa có official
+inference/checkpoint truy cập được. Không có adapter giả.
+Bleed-through/Gatos/energy-MRF giữ nghiên cứu vì thiếu
+điều kiện dữ liệu hoặc implementation đã xác minh. MSRCR từng kênh chưa thêm vì
+đổi cân bằng màu; MSRCP là lựa chọn giữ tỷ lệ RGB có giới hạn, không bảo đảm màu.
+
 ## Các hướng mở rộng xử lý ảnh
 
 Các giả thuyết dưới đây tạo variant độc lập trong Notebook 1, chưa có kết luận

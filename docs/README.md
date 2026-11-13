@@ -1,42 +1,17 @@
-# OCR chữ Hán cổ và dịch tiếng Việt
+# OCR Hán cổ và dịch tiếng Việt
 
-Mở rộng ảnh ngày 12/11/2026: Notebook 1 tạo ảnh, Notebook 3 chỉ đọc variant đã
-lưu. Bổ sung xử lý màu/nền, Sauvola/Niblack, bilateral, unsharp và adapter
-DocRes/DocDiff/Restormer. Trạng thái asset và khả năng chạy offline được kiểm
-riêng; có adapter chưa có nghĩa đã chạy inference.
+Điểm bắt đầu cho pipeline PDF → ảnh canonical → các variant độc lập → Dataset
+bất biến → OCR và rà soát. Corpus chưa có ground truth; đồng thuận và stability
+không xác nhận accuracy.
 
-Dự án chuyển PDF scan sách Hán, đặc biệt sách Y học cổ truyền, thành bản chép
-có thể rà soát rồi dịch sang tiếng Việt. Khó khăn chính là nguồn ít pixel, chữ
-phồn thể/dị thể, bố cục phức tạp và không có bản chép chuẩn để đối chiếu
-(ground truth). Một câu trôi chảy chưa chứng minh chữ đã được nhận dạng đúng.
-
-Notebook 1 tạo bộ ảnh bất biến để người dùng upload thành Kaggle Dataset.
-Notebook 3 dùng lại bộ ảnh đó trong phiên mới, giữ raw checkpoint để thay đổi
-đánh giá mà không inference lại.
-
-Cách tiếp cận là giữ ảnh gốc, chạy nhiều OCR trên cùng lựa chọn, lưu các phương
-án bất đồng và đưa bằng chứng về cho người đọc. Đồng thuận, độ ổn định khi đổi
-ảnh và độ phủ không gian giúp tìm chỗ cần xem; chúng không đo accuracy.
-
-```mermaid
-flowchart LR
-    A[PDF và ảnh nguồn] --> B[OCR và lưu phương án]
-    B --> C[Đối chiếu văn bản và hình ảnh]
-    A --> C
-    C --> D[Người đọc rà soát bản Hán]
-    D --> E[Dịch tiếng Việt]
-```
-
-## Đọc tài liệu
-
-| Tài liệu | Mục đích |
+| Đọc tiếp | Nội dung |
 |---|---|
-| [Bài toán và giới hạn](problem.md) | Dữ liệu, mục tiêu và nguyên tắc xử lý sự không chắc chắn. |
-| [Pipeline hiện tại](pipeline.md) | Luồng đã có trong mã, hợp đồng dữ liệu và giới hạn bằng chứng. |
-| [Giả thuyết nghiên cứu](hypotheses.md) | H01–H10: lý do thử, cách kiểm chứng và điều kiện thất bại. |
-| [Vận hành và kiểm chứng](usage.md) | Notebook, runtime, tài sản offline, chạy mẫu nhỏ, checkpoint và xử lý lỗi. |
+| [Bài toán](problem.md) | Ba nhóm ảnh đã quan sát, nguồn và giới hạn bằng chứng |
+| [Giả thuyết](hypotheses.md) | Cơ chế, inductive bias và những điều cần kiểm chứng |
+| [Pipeline](pipeline.md) | Trạng thái thực, manifest/cache và hai trục đánh giá |
+| [Vận hành](usage.md) | Cấu hình notebook, asset offline, scripts và đọc kết quả |
+| [4 GPU L4](multi_gpu_l4.md) | Cấu hình mới cho notebook 0, 1, 3; chia model và chạy worker đồng thời |
+| [Báo cáo khả thi](../reports/restoration_feasibility.md) | Mẫu thật, mọi phương pháp cũ/mới, ma trận và quyết định |
 
-Mốc đối chiếu tài liệu: **12/11/2026**, nhánh `mduy`. Mã có adapter cho bốn OCR,
-chuẩn bị ảnh, consensus, coverage, stability và dịch. Có kiểm thử CPU/dữ liệu
-tổng hợp; điều đó không xác nhận inference bốn model trên Kaggle hay chất lượng
-OCR của corpus. Phạm vi kiểm chứng cụ thể nằm trong hướng dẫn vận hành.
+Notebook chạy thực tế trên Kaggle. Kiểm tra local chỉ là CPU nhỏ/static, không
+thay xác nhận Linux/GPU/Internet Off. Giữ original và raw checkpoint để rà soát.

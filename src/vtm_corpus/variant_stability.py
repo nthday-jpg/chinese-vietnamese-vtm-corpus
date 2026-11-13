@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .text_alignment import comparison_text, align_characters, AlignmentLimitError
+from .restoration_registry import variant_spec
 
 
 STABILITY_DEFAULTS = {'reference_variant': 'original', 'compare_by_engine': True,
@@ -88,7 +89,83 @@ def stability_regions(record):
     return {r['canonical_region_id']: r for r in regions if r.get('canonical_region_id')}
 
 
-def analyze_variant_stability(records_by_variant, engines, *, options=None, input_states=None):
+def stability_pair_summary(pairs, *, rate=True):
+    measured = [c for c in pairs if c.get('exact_agreement') is not None and c.get('eligible', True)]
+    same = sum(c['exact_agreement'] for c in measured)
+    return dict(measured_pairs=len(measured), exact_agreement_pairs=same,
+        exact_agreement_rate=same/len(measured) if rate and measured else None,
+        changed_pairs=sum(c['exact_agreement'] is False for c in measured),
+        unresolved_alignments=sum(c['status'] in {'ambiguous_alignment', 'analysis_incomplete'} for c in pairs),
+        missing_pairs=sum(c['status'] == 'missing_output' for c in pairs),
+        ineligible_pairs=sum(not c.get('eligible', True) for c in pairs),
+        denominator='available eligible reference-versus-variant pairs; dependent observations, not votes')
+
+
+def stability_mechanism_groups(comparisons, engines):
+    groups = {}
+    for group in sorted({c['method_family'] for c in comparisons}):
+        pairs = [c for c in comparisons if c['method_family'] == group]
+        groups[group] = dict(variants=sorted({c['variant'] for c in pairs}),
+            by_engine={engine: stability_pair_summary([c for c in pairs if c['engine'] == engine]) for engine in engines},
+            by_interpretation={kind: {engine: stability_pair_summary([c for c in pairs if c['engine'] == engine
+                and c['perturbation_class'] == kind]) for engine in engines}
+                for kind in sorted({c['perturbation_class'] for c in pairs})},
+            interpretation='sensitivity, not content-preserving invariance' if group in {
+                'neural_restoration', 'generative_reconstruction', 'binarization', 'denoising_sharpening'}
+                else 'inspect perturbation_class; even conservative probes may alter evidence')
+    return groups
+
+
+def stability_joint_changes(comparisons):
+    readings = {}
+    for pair in comparisons:
+        if not pair.get('eligible', True):
+            continue
+        for item in pair['regions'] or [pair]:
+            if item['exact_agreement'] is not False or item['status'] not in {'changed', 'ambiguous_alignment'}:
+                continue
+            key = (pair['variant'], item['region_id'], comparison_text(item['variant_text']))
+            readings.setdefault(key, []).append(pair['engine'])
+    return [dict(variant=v, region_id=r, alternative=text, engines=sorted(set(es)),
+                 status='uncertain', interpretation='shared change, not independent confirmation or correctness')
+            for (v, r, text), es in readings.items() if len(set(es)) > 1]
+
+
+def stability_consensus_axes(records_by_variant, comparisons, engines, *, max_regions=256):
+    """Region-level whole-reading agreement, separate from character consensus."""
+    region_ids = sorted({r for records in records_by_variant.values() for rec in records.values()
+                         for r in stability_regions(rec)})
+    output = []
+    for region_id in region_ids[:max_regions] or ['page_text']:
+        for group in sorted({c['method_family'] for c in comparisons}):
+            pairs = [r for c in comparisons if c['method_family'] == group for r in (
+                [c] if region_id == 'page_text' else c['regions']) if r['region_id'] == region_id]
+            expected = len(engines)*len({c['variant'] for c in comparisons if c['method_family'] == group})
+            eligible = len(pairs) == expected and bool(pairs) and all(
+                c.get('eligible', True) and c['status'] in {'stable', 'changed'} for c in pairs)
+            stability = 'high' if eligible and all(c['exact_agreement'] for c in pairs) else 'low' if eligible else 'uncertain'
+            agreement = {}
+            variants = ['original', *sorted({c['variant'] for c in comparisons if c['method_family'] == group})]
+            for variant in variants:
+                texts = []
+                for engine in engines:
+                    rec = records_by_variant.get(variant, {}).get(engine)
+                    raw = (rec or {}).get('raw', {})
+                    region = stability_regions(rec).get(region_id)
+                    text = rec.get('text') if rec and region_id == 'page_text' else (region or {}).get('text')
+                    if rec and not rec.get('quality_issues') and not raw.get('hit_max') and text:
+                        texts.append(comparison_text(text))
+                counts = Counter(texts)
+                agreement[variant] = ('uncertain' if len(texts) < len(engines) else
+                    'high' if max(counts.values(), default=0) > len(engines)/2 else 'low')
+            output.append(dict(region_id=region_id, method_family=group,
+                within_engine_stability=stability, across_engine_agreement=agreement, status='uncertain',
+                correctness='unverified', definition='high agreement: strict majority of configured engines has identical whole-region reading; high stability: all eligible pairs unchanged'))
+    return output
+
+
+def analyze_variant_stability(records_by_variant, engines, *, options=None, input_states=None,
+                              configuration_identities=None):
     """Input: variant -> engine -> prepared checkpoint or None, for one page."""
     p = stability_settings(options)
     reference = p['reference_variant']
@@ -121,6 +198,18 @@ def analyze_variant_stability(records_by_variant, engines, *, options=None, inpu
                 rec = records.get(engine)
                 pair = compare_variant_text(ref['text'] if ref else None, rec['text'] if rec else None, options=p)
                 pair.update(engine=engine, reference_variant=reference, variant=variant, region_id='page_text', regions=[])
+                pair.update(variant_spec(variant), eligible=True)
+                quality = any(r and (r.get('quality_issues') or r.get('raw', {}).get('hit_max') is True) for r in (ref, rec))
+                processor_ids = [(r or {}).get('raw', {}).get('image_preparation', {}).get('processor_identity')
+                                 for r in (ref, rec)]
+                processor_mismatch = all(processor_ids) and processor_ids[0] != processor_ids[1]
+                config_mismatch = configuration_identities is not None and (
+                    not configuration_identities.get(reference, {}).get(engine) or
+                    configuration_identities.get(reference, {}).get(engine) != configuration_identities.get(variant, {}).get(engine))
+                if quality or config_mismatch or processor_mismatch:
+                    pair.update(eligible=False, status='ineligible_pair', exact_agreement=None,
+                        uncertainty=['quality_ineligible' if quality else 'inference_configuration_mismatch'
+                            if config_mismatch else 'processor_runtime_identity_mismatch'])
                 regions = stability_regions(rec)
                 region_ids = sorted(ref_regions.keys() | regions.keys())
                 for region_id in region_ids[:p['max_regions']]:
@@ -138,10 +227,15 @@ def analyze_variant_stability(records_by_variant, engines, *, options=None, inpu
                                 'engine': engine, 'variant': variant, 'region_id': region_id,
                                 'reason': 'Detector/adapter change; not proof of missing text'})
                     if a and b and a['page_box'] != b['page_box']:
-                        diagnostic.update(status='source_geometry_mismatch', changes=[])
+                        diagnostic.update(status='source_geometry_mismatch', changes=[], exact_agreement=None, eligible=False)
+                        pair.update(eligible=False)
+                    if not pair['eligible']:
+                        diagnostic.update(eligible=False, exact_agreement=None)
                     pair['regions'].append(diagnostic)
                 pair['regions_complete'] = len(region_ids) <= p['max_regions']
                 pair['confounds'] = []
+                if not all(processor_ids):
+                    pair['confounds'].append('processor_runtime_identity_unobserved; controlled_comparison_uncertain')
                 if not pair['regions'] or any(not r['reference_processor'] or not r['variant_processor'] for r in pair['regions']):
                     pair['confounds'].append('backend_processor_sizes_unobserved')
                 if any(r['reference_processor'] and r['variant_processor'] and
@@ -170,14 +264,23 @@ def analyze_variant_stability(records_by_variant, engines, *, options=None, inpu
         if len(texts) > 1 and all(t is not None for t in texts) and len({comparison_text(t) for t in texts}) == 1:
             risks.append({'kind': 'shared_reading_unverified_across_variants', 'engine': engine,
                           'reason': 'Stability cannot rule out shared errors or omissions'})
-    measured = [c for c in comparisons if c['exact_agreement'] is not None]
-    summary = {'measured_pairs': len(measured), 'exact_agreement_pairs': sum(c['exact_agreement'] for c in measured),
-        'exact_agreement_rate': sum(c['exact_agreement'] for c in measured)/len(measured) if measured else None,
-        'changed_pairs': sum(c['exact_agreement'] is False for c in measured),
-        'unresolved_alignments': sum(c['status'] in {'ambiguous_alignment', 'analysis_incomplete'} for c in comparisons),
-        'missing_pairs': sum(c['status'] == 'missing_output' for c in comparisons)}
-    return {'schema': 'vtm-variant-stability-v1', 'reference_variant': reference, 'matrix': matrix,
+    summary = stability_pair_summary(comparisons, rate=False)
+    summary['rate_scope'] = 'no pooled rate across mechanisms; see groups by_engine and by_interpretation'
+    regional = [{**r, **{k: c[k] for k in ('engine', 'variant', 'method_family', 'perturbation_class')}}
+                for c in comparisons for r in c['regions']]
+    return {'schema': 'vtm-variant-stability-v2', 'reference_variant': reference, 'matrix': matrix,
         'comparisons': comparisons, 'risks': risks, 'summary': summary, 'parameters': p,
+        'groups': stability_mechanism_groups(comparisons, engines),
+        'region_groups': stability_mechanism_groups(regional, engines),
+        'group_units': {'groups': 'page text pairs', 'region_groups': 'observed canonical region text pairs'},
+        'engine_sensitivity_profiles': {e: {g: [c['variant'] for c in comparisons if c['engine'] == e
+            and c['method_family'] == g and c.get('eligible') and c['exact_agreement'] is False]
+            for g in sorted({c['method_family'] for c in comparisons})} for e in engines},
+        'sensitive_text_positions': [{**change, 'engine': c['engine'], 'variant': c['variant'],
+            'region_id': r['region_id'], 'status': 'uncertain; text offsets are not glyph coordinates'}
+            for c in comparisons if c.get('eligible') for r in c['regions'] for change in r['changes']],
+        'joint_changes': stability_joint_changes(comparisons),
+        'consensus_stability_axes': stability_consensus_axes(records_by_variant, comparisons, engines, max_regions=p['max_regions']),
         'vote_policy': 'within_engine_pairs_only; across_engine_consensus_separate_per_variant',
         'limitations': ['Stability and edit distance are not accuracy, CER or WER.',
                        'Dependent variants do not increase the number of independent engines.']}

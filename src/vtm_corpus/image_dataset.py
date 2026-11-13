@@ -97,7 +97,7 @@ def dataset_code_signature():
         return IMAGE_DATASET_CODE_SIGNATURE
     root = Path(__file__).parent
     return dataset_hash({name: dataset_file_hash(root/name) for name in
-                         ("image_dataset.py", "image_preparation.py", "pdf_images.py", "restoration_classical.py")})
+                         ("image_dataset.py", "image_preparation.py", "pdf_images.py", "restoration_classical.py", "restoration_registry.py")})
 
 
 def dataset_environment():

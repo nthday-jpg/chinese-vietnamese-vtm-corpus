@@ -19,9 +19,15 @@ def restoration_failure_state(error, *, phase='inference'):
 
 
 def select_preparation_variants(mode, selected):
-    classical = ['original', 'clahe', 'denoised', 'bicubic_x2', 'bicubic_x4']
-    neural = ['realesrgan_x4', 'tadisr_x4', 'difftsr', 'unihir_restoration']
+    from .restoration_registry import VARIANT_SPECS, UNAVAILABLE_RESTORATION_METHODS
+    classical = [name for name, spec in VARIANT_SPECS.items() if spec[1] in {
+        'source_observation', 'deterministic_transformation'}]
+    neural = [name for name, spec in VARIANT_SPECS.items() if spec[1] in {
+        'neural_restoration', 'generative_reconstruction'} and name != 'difftsr']
     if mode == 'selected':
+        unavailable = {n:UNAVAILABLE_RESTORATION_METHODS[n] for n in selected if n in UNAVAILABLE_RESTORATION_METHODS}
+        if unavailable:
+            raise ValueError('No runnable upstream/checkpoint for requested methods: '+str(unavailable))
         return list(selected)
     if mode == 'classical':
         return classical

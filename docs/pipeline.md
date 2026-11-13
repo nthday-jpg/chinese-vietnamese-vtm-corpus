@@ -1,5 +1,54 @@
 # Pipeline hiện tại
 
+## Learned restoration bổ sung ngày 13/11/2026
+
+Đã tích hợp DocEnTR base/8 H-DIBCO2018 và ba task pretrained DE-GAN. Notebook 1
+mặc định `all_eligible`; các phương pháp chưa có tài nguyên thật được nêu rõ.
+[`learned_document_restoration.py`](../src/vtm_corpus/learned_document_restoration.py)
+dùng BinModel upstream/vit-pytorch đã pin; DE-GAN dùng nguyên generator với
+Keras 3 backend Torch. DocEnTR giữ BGR/normalization như demo, DE-GAN giữ Pillow
+grayscale. Patch 256 không resize/rotate; ghép patch và bỏ white padding.
+
+Wheel offline ở `learned_documents_runtime.json`; worker riêng kế thừa Torch/
+NumPy kernel đã đo. Archive DE-GAN giữ đủ ba checkpoint, giải nén tạm từng task.
+Watermark removal phải có approval vùng; reader Notebook 3 cũng kiểm điều kiện
+này. Raw OCR, consensus và cách resume hiện có được giữ.
+
+DocEnTR khớp 146/146 tensor về key/shape bằng FakeTensor/meta, không forward;
+DE-GAN được kiểm ZIP/HDF5 header/hash và loader mock. Chưa xác nhận runtime
+Keras hoặc inference GPU trên Kaggle, cũng chưa có kết quả OCR mới.
+
+## Mở rộng theo khảo sát ba nhóm sách
+
+Notebook 1 và reader Notebook 3 dùng chung
+[`restoration_registry.py`](../src/vtm_corpus/restoration_registry.py). Thêm 11
+variant CPU; không viết lại các adapter neural đã có. `VARIANT_MODE='classical'`
+chọn đồng thời tất cả CPU, hoặc `selected` chọn từng hypothesis độc lập.
+`APPLICABILITY` giới hạn sách/crop hoặc yêu cầu approval vùng do người khảo sát
+khai báo; trạng thái `not_applicable` có lý do, không giả detector degradation.
+Tên sách trong điều kiện nhận cả `1` và `1.pdf`.
+
+Manifest ghi algorithm/family, perturbation class, parameters, input/output
+hash, affine/provenance, applicability, runtime state, seconds và cache key.
+Classical mới còn ghi giới hạn pixel và estimate workspace (không là peak RAM đã
+đo). Plan trước sinh variant đếm output/scaled pixels và upper estimate PNG;
+storage estimate trước cache/dedup có thể quá cao, hard byte cap vẫn kiểm ở mỗi
+lần ghi. Vượt pixel thì lỗi/partial rõ ràng, không tự downscale.
+
+Notebook 3 giữ nguyên raw OCR và bốn phiếu engine mỗi variant. Stability v2 bỏ
+tỷ lệ gộp, tách sáu cơ chế/từng engine và thống kê canonical region riêng; giữ
+color projections mất thông tin dưới nhãn sensitivity. Có engine sensitivity
+profiles, shared reading changes, text positions chưa có tọa độ glyph và hai
+trục consensus/stability. Khác config hoặc quality-ineligible không vào mẫu số.
+Summary theo G1/G2/G3 dùng SHA đã khảo sát hoặc `ADVANCED['book_groups']` tường
+minh; hash mới là `unclassified`. Alias trùng source/page được loại lặp trong
+summary; vẫn giữ raw theo tên sách. Reader chấp nhận alias có kết quả giống hệt,
+nhưng báo lỗi nếu điều kiện tạo kết quả mâu thuẫn; nên chọn sách không trùng.
+
+Đọc [báo cáo khả thi](../reports/restoration_feasibility.md) cho dữ liệu, bảng mọi
+phương pháp và rủi ro. Các kiểm tra local là CPU nhỏ/static; không chứng minh
+runtime Linux/Kaggle, GPU hoặc cải thiện accuracy.
+
 ## Thiết kế mở rộng ảnh ngày 12/11/2026
 
 Mở rộng `VARIANT_MODE`, `VARIANT_OPTIONS`, `MODEL_OPTIONS` và `prep_*` hiện có;
@@ -58,7 +107,7 @@ flowchart TD
 |---|---|
 | Notebook 1: canonical, classical, provenance, cache, QC | Đã có mã và kiểm thử CPU. |
 | Real-ESRGAN / TADiSR / DiffTSR / UniHIR | Có adapter; ảnh Real-ESRGAN đã lưu, ba adapter còn lại chưa xác nhận inference thật trong bằng chứng khảo sát. |
-| DocRes / DocDiff / Restormer | Adapter upstream thực, kiểm thử hợp đồng CPU/mock; DocRes/DocDiff đã có weights, Restormer còn hoãn download. Chưa inference thật. |
+| DocRes / DocDiff / Restormer | Adapter upstream thực; local đã có weights cả ba họ. Audit ngắn hiện tại kiểm presence/size và hash có ngân sách; checksum file lớn theo manifest cũ. GPU/Kaggle chưa xác minh. |
 | Notebook 3: bốn worker tuần tự, consensus, coverage, stability | Đã có mã; kiểm thử mock/synthetic không xác nhận bốn model chạy trên Kaggle. |
 | Export đầy đủ restoration extension, trạng thái lỗi chi tiết | Đã sửa; test CPU kiểm snapshot partial, archive extension và chuyển root. |
 | Restoration Ablation, Visual Fidelity, nhãn thủ công | Đã triển khai opt-in, kiểm thử synthetic/checkpoint giả; chưa xác nhận Kaggle hoặc hiệu quả OCR. |

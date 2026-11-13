@@ -1,5 +1,143 @@
 # Vận hành và kiểm chứng
 
+## Toàn bộ phương pháp đã tích hợp — 13/11/2026
+
+Notebook 1 mặc định `VARIANT_MODE='all_eligible'`, chạy độc lập mọi CPU/neural
+đã tích hợp từ original. `VARIANTS` chỉ dùng khi chọn `selected`. Phạm vi dữ
+liệu vẫn mặc định một sách/một trang; không tự downscale, deskew hoặc dewarp.
+
+Đã bổ sung `docentr_binarization`, `degan_binarization`, `degan_deblurring`,
+`degan_watermark_removal`; source/checkpoint có revision và SHA-256:
+
+```text
+kaggle_upload/models/image_restoration/docentr/model_8_2018_base.pt
+kaggle_upload/models/image_restoration/degan/degan_weights.bundle
+kaggle_upload/packages/image_restoration/sources/docentr/
+kaggle_upload/packages/image_restoration/sources/degan/
+kaggle_upload/packages/image_restoration/wheels/
+kaggle_upload/packages/image_restoration/manifests/learned_documents_runtime.json
+```
+
+DE-GAN `.bundle` là ZIP chứa ba weights HDF5 gốc, giữ một bản duy nhất. Worker
+kiểm hash và giải nén riêng task vào thư mục tạm writable. Keras 3 dùng backend
+Torch trong worker riêng; không cài TensorFlow 1.x hoặc hạ Torch/NumPy. DocEnTR
+dùng BinModel/vit-pytorch 0.24.3, base/patch 8. Cả hai dùng patch 256 không resize/
+rotate; bỏ padding về kích thước nguồn. Chưa xác minh inference GPU trên Kaggle.
+
+Watermark removal cần `REVIEWED_REGIONS['1:1:column_000'] =
+{'watermark_removal_approved': True}` vì có thể xóa mực đỏ thật. Chưa duyệt thì
+ghi `not_applicable`. DiffTSR tiếp tục chỉ chọn tường minh theo điều kiện dòng.
+
+Script tự tìm root, stage đúng chỗ, resume `.part` và không tải lại file hợp lệ:
+
+```powershell
+.venv/Scripts/python.exe -X utf8 tools/prepare_learned_restoration_assets.py --download
+```
+
+Nếu chưa có kernel snapshot, thêm `--environment-report <JSON từ Notebook 0>`.
+Nhóm tổng >5 GB hoặc ước tính >5 phút được hoãn để bạn tự chạy:
+
+```powershell
+.venv/Scripts/python.exe -X utf8 tools/prepare_learned_restoration_assets.py --download --include-large
+.venv/Scripts/python.exe -X utf8 tools/download_large_restoration_assets.py --all
+.venv/Scripts/python.exe -X utf8 tools/download_unihir_checkpoint.py --download --accept-unihir-noncommercial --connections 4
+```
+
+Hai checkpoint mới và ba wheel Linux cp313 đã đủ trong workspace. Upload lại
+**models và packages hiện tại**, không dùng ZIP upload cũ. Kernel dependency
+được tái dùng theo inventory đã đo; khác ABI/version phải chuẩn bị lại, không
+fallback tải mạng. Notebook 3 đã có reader; thêm các tên mới vào `OCR_VARIANTS`
+để đọc ảnh đã lưu, không chạy lại restoration.
+
+Để gửi cấu hình phiên Kaggle mới, chạy Notebook 0 với models/packages hiện tại,
+Internet Off và `RESTORATION_GPU_CHECK='off'` (mặc định mới). Kiểm môi trường toàn
+diện với `quick_restoration_checks=False`, `check_existing_runtimes=True`, ngân
+sách tối đa 900 giây; không build hoặc nạp weights. Có inventory mọi distribution,
+dependency, wheel METADATA/tags, nguồn/license, CUDA/native API nhỏ và đối chiếu
+kernel/overlay với từng runtime plan. Gửi lại **`kaggle_environment_logs.zip`**
+trong Output, kể cả báo cáo lỗi hoặc partial. Có thể chọn chế độ probe nhanh
+qua `quick_restoration_checks=True` nếu chỉ cần restoration.
+
+LWTformer/GLADUnet chưa có checkpoint/inference upstream được xác minh; Gatos/
+energy và bleed-through chuyên biệt chưa có implementation đã pin. Notebook
+công khai `not_integrated_methods`; không có adapter giả cho các tên này.
+
+## Chạy nhiều cơ chế sau khảo sát dữ liệu thật
+
+[Báo cáo khả thi](../reports/restoration_feasibility.md) mô tả 13 trang nguồn
+độc lập, các profile phương pháp và giới hạn. Các phương pháp mới chỉ dùng
+NumPy/OpenCV/Pillow đã có trong payload; không thêm checkpoint hoặc cài Torch.
+
+Trong ô cấu hình Notebook 1, giữ giới hạn smoke hiện có rồi chọn:
+
+```python
+VARIANT_MODE = 'selected'  # hoặc 'classical' để chạy mọi phương pháp CPU
+VARIANTS = ['original', 'clahe', 'bicubic_x2', 'bicubic_x4',
+            'retinex_msr', 'retinex_msrcp', 'wolf', 'nick',
+            'color_pca', 'color_gmm', 'mean_shift', 'anisotropic_diffusion',
+            'background_morphological', 'background_guided', 'background_otsu']
+APPLICABILITY = {'color_gmm': {'books': ['1', '2', '4', '6']}}
+# Ví dụ tham số; không phải giá trị tốt nhất đã xác minh:
+VARIANT_OPTIONS['anisotropic_diffusion'] = {'iterations': 5, 'kappa': 12., 'timestep': .15}
+```
+
+Chạy lại ô cấu hình sau khi sửa để cập nhật `CONFIG`. Mỗi variant nhận cùng
+original, không nối chuỗi mặc định. `background_otsu` là hypothesis kết hợp có
+tên và provenance riêng. `APPLICABILITY` nhận `books`, `crop_types`,
+`require_review`; khi yêu cầu review, thêm `approved_variants` vào
+`REVIEWED_REGIONS['book:page:region']`. `excluded_variants` vẫn dùng được.
+Tên có/không `.pdf` đều được nhận. Đây là điều kiện thủ công, không phải detector.
+
+Plan in ra và lưu `_dataset/last_plan.json`: số region/ảnh, scaled pixels,
+estimate storage trước cache/dedup, giới hạn pixel. Estimate có thể dư khi ảnh
+trùng; actual byte cap vẫn được kiểm ở từng lần ghi. Một số method có cap riêng:
+Mean Shift 4 triệu, GMM/diffusion 8 triệu, Retinex/guided 12 triệu pixel input;
+vượt thì chọn region nhỏ hơn tường minh, không tự giảm ảnh. `ALLOW_PARTIAL=True`
+lưu trạng thái lỗi/thiếu có giải thích; không được xem partial là đủ phương pháp.
+
+Để tránh OCR lặp nguồn, với bộ PDF hiện tại có thể chọn `BOOKS=['1','2','4','6',
+'bien','kinh']`, vì `3` trùng `2`, `5` trùng `4`. Không xóa file nguồn. Nếu chọn
+cả alias, reader kiểm kết quả giống nhau; nếu applicability tạo kết quả khác
+nhau trên cùng source thì báo xung đột thay vì chọn ngầm một bản.
+
+Trong Notebook 3, bật `ENABLE_MULTI_VARIANT_OCR`, trỏ `PREPARED_IMAGES` tới
+`_dataset/dataset.json` hoặc immutable snapshot, đặt `PREPARED_MISSING_FALLBACK=False`
+và chọn `OCR_VARIANTS` chỉ gồm ảnh đã sinh. Chọn cùng `PREPARED_CROP_TYPE` cho mọi
+engine. Bật `ENABLE_RESTORATION_ABLATION` để xem Utility A và
+`ENABLE_VISUAL_FIDELITY` nếu cần chẩn đoán pixel; stability B tách sáu cơ chế,
+từng engine, và canonical region. `summary.exact_agreement_rate` tổng là `null`
+có chủ đích; đọc `groups`, `region_groups`, `engine_sensitivity_profiles`,
+`joint_changes`, `consensus_stability_axes`, và `stability_summary.by_book_group`.
+G1/G2/G3 được tra bằng SHA đã xem, file mới giữ `unclassified`; có thể khai báo
+`ADVANCED['book_groups']={'my_book.pdf':'G1'}` sau khi khảo sát.
+
+Các projection Lab a/b, red-only, PCA/GMM được đánh dấu mất thông tin có chủ đích;
+không đọc tỷ lệ của chúng như invariance bảo toàn nội dung. `uncertain`, thiếu
+processor/config/geometry và alignment mơ hồ cần được giữ. Bốn engine không
+thành 4×số variant phiếu. Khi chỉ đánh giá lại, dùng `RUN_OCR=False` và manifest
+multi-variant cũ; không nạp OCR hoặc restoration. Khi thêm variant, scheduler
+chỉ làm các tác vụ chưa có checkpoint hợp lệ với cùng source/engine/config.
+
+Source scripts và tests liên quan nay có exception `.gitignore`; weights, PDFs,
+preview PNG không vào Git. Muốn dựng lại source notebook sau sửa module, chạy
+`tools/update_restoration_notebook.py`, rồi `tools/compact_image_notebook.py --check`;
+đây chỉ là build/static, không Run All.
+
+Audit ngắn không tải/cài/chạy model:
+
+```powershell
+.venv/Scripts/python.exe -X utf8 tools/audit_restoration_assets_quick.py
+```
+
+Kiểm mọi file được liệt kê có mặt/đúng size, hash tối đa 256 MiB; file lớn dùng
+digest manifest cũ, không gọi là hash mới. Full checksum tùy chọn bằng verifier
+hiện có ở phần dưới. Nếu thiếu tài sản nhỏ, dùng preparation script; nhóm >5 GB
+hoặc ước tính >5 phút dùng dedicated downloader, tự stage đúng `kaggle_upload/`.
+Khi chuẩn bị runtime mới, truyền `--environment-report <file JSON từ Notebook 0>`
+để khóa phiên bản Linux/ABI theo Kaggle thật, không giả định từ máy Windows.
+Không chạy kiểm tra workflow local như bằng chứng Kaggle; chỉ kiểm static/CPU
+ngắn. Chưa xác nhận runtime-ready hay inference GPU cho các model trong đợt này.
+
 ## Tài sản restoration mở rộng — bàn giao ngày 12/11/2026
 
 Implementation đã có trong Notebook 1 và reader Notebook 3. Chưa chạy notebook,
@@ -113,13 +251,18 @@ kaggle_upload/
   packages/                       # Dataset packages
     image_restoration/
       sources/docres/, docdiff/, restormer/  # source/config/license đã pin
-      sources/<model>-<revision>.zip         # archive nhỏ, đã kiểm hash
       sources/TADiSR/, BasicSR/, Real-ESRGAN/
       wheels/                     # overlay + PDFium Linux cp313
       requirements/document.txt, tadisr.txt
       runtime/                    # helper versioned, giữ helper legacy nguyên byte
-      manifests/                  # catalog, receipts, source archive/runtime inventory
+      manifests/                  # catalog, receipts, source/runtime inventory
 ```
+
+Runtime dùng trực tiếp các thư mục source đã giải nén. Script chuẩn bị không
+tạo thêm ZIP trùng của DocRes/DocDiff/Restormer. Để dọn các ZIP từ lần chuẩn bị
+cũ, chạy `./tools/remove_redundant_source_zips.ps1`; script kiểm hash source và
+đối chiếu toàn bộ nội dung ZIP trước khi xoá. Giữ wheel `.whl` và source
+`flash_attn-*.tar.gz` vì chúng cần cho cài đặt/build offline.
 
 Tài sản local đã xác minh không đồng nghĩa Dataset trên Kaggle đã đầy đủ. ZIP
 models/packages cũ chưa cập nhật tự động. Upload nguyên hai thư mục gốc sau khi
@@ -160,12 +303,69 @@ và hợp đồng tọa độ nằm trong [pipeline](pipeline.md); mục tiêu �
 
 | Notebook | Cách dùng |
 |---|---|
-| [0 — môi trường](../0_kiem_tra_moi_truong_kaggle_offline.ipynb) | Kiểm kê Python, package, ABI, GPU và phép thử nhỏ; xuất JSON/TXT. Không cài package hay OCR. Chạy lại khi kernel đổi. |
+| [0 — môi trường](../0_kiem_tra_moi_truong_kaggle_offline.ipynb) | Inventory + chế độ Kaggle-only build/probe FlashAttention và UniHIR thật trên một trang; xuất ZIP log kể cả khi lỗi. Không tải mạng, không OCR; local không build/inference. |
 | [1 — chuẩn bị ảnh](../1_chuan_bi_anh_ocr.ipynb) | Phiên riêng: PDF → canonical, biến thể, manifest, QC (kiểm tra chất lượng) và preview; chuyển output thành Dataset. Không bắt buộc cho OCR PDF trực tiếp. |
 | [3 — OCR và rà soát](../3_so_sanh_so_chu_ocr.ipynb) | Chạy từng engine, lưu checkpoint, so sánh và xuất báo cáo offline. |
 | [2 — dịch](../2_dich_han_viet.ipynb) | Dịch TXT Hán đã chọn; kiểm tra `INPUT_DIR` vì local mặc định tìm run OCR mới nhất, chưa chắc là bản đã duyệt. Kaggle vẫn cần mạng để clone/cài repo và tải model. |
 
 ## Môi trường và tài sản offline
+
+### Chạy Notebook 0 và gửi log GPU
+
+Upload bản Notebook 0 mới, gắn models/packages/PDF và giữ Internet Off. Điền
+`PACKAGES_DIR`, `MODELS_DIR`, `DATA_DIR` (thư mục trực tiếp chứa PDF), rồi Run All.
+Mặc định là `RESTORATION_GPU_CHECK='off'`: kiểm kê và probe môi trường toàn diện,
+ngân sách tối đa 900 giây, không build/inference. Nếu chủ động bật `'unihir_smoke'`: một PDF, một
+trang, crop page, `steps=10`, `ref_count=1`, không dùng cache ảnh restoration.
+`books=[]` chọn PDF đầu; `pages='1'` có thể đổi trang nhưng tổng vẫn giới hạn một.
+
+`'off'` chỉ inventory; `'build_and_probe'` chỉ build wheel và chạy cả fixed/varlen
+FlashAttention, kiểm finite và đối chiếu SDPA, không nạp weights. GPU smoke UniHIR
+kiểm GPU đầu >=75 GiB trước khi đọc weights/build. Kernel Python/ABI và package
+versions phải khớp plan; lỗi khớp môi trường được lưu để điều chỉnh bundle.
+Overlay kế thừa Torch hiện có, không hạ package kernel. Cache native hợp lệ được
+dùng lại với wheel checksum và CUDA probe mới; inference một trang luôn mới.
+
+Mỗi lần kiểm có phase report riêng: hardware, asset integrity, runtime build,
+FlashAttention CUDA, worker preflight, model load, inference, output validation.
+`native_build_verified`, `flash_attention_cuda_verified`, `model_inference_verified`
+được ghi độc lập. Import thành công không được nâng thành inference thành công.
+Compile hoặc inference lỗi/timeout vẫn giữ traceback/log; supervisor dừng cả
+nhóm tiến trình trên Linux. Tổng timeout mặc định 5400 giây, chỉnh được trong ô
+cấu hình; phase load/inference có timeout riêng. Đây không phải ước tính thời gian chạy.
+
+Sau cùng gửi file `restoration_check_*_logs.zip` trong Output: gồm JSON/TXT,
+build log, receipt, worker log và hai ảnh cùng trang nếu thành công. ZIP không
+chứa weights hoặc venv. Chỉ inventory thì tên `kaggle_environment_logs.zip`.
+Nếu tự ngắt trước ô cuối, phase JSON và log vẫn còn trong thư mục
+`restoration_check_*`; chạy ô lưu cuối để gom ZIP.
+
+Kiểm local bổ sung: 53/53 file model OCR và 74 artifact package/source OCR
+(~3,93 GiB) qua hash/source-tree audit; sáu nhóm catalog restoration và UniHIR
+cũng đủ, hash và wheel metadata đạt. Báo cáo:
+`packages/image_restoration/manifests/full_local_inventory_verification.json`
+và `notebook0_preparation_audit.json`. Điều này chưa xác minh runtime/native ops
+hoặc inference Kaggle cho toàn bộ OCR/restoration.
+
+### Trạng thái asset DiffTSR
+
+DiffTSR đã bị loại khỏi `all_eligible`; weights đã retired khỏi staging hiện
+dùng. Notebook 0 ghi `excluded_by_configuration`, không coi đây là tài nguyên
+đủ để inference. Adapter legacy, line gate và reader kết quả cũ vẫn được giữ.
+Nếu một bản staging cũ còn asset riêng của DiffTSR, script dọn có kiểm phạm vi
+đường dẫn và tham chiếu dependency dùng chung:
+
+```powershell
+.\tools\remove_difftsr_assets.ps1 -WhatIf
+.\tools\remove_difftsr_assets.ps1
+```
+
+Script không chạm `denoised`, Real-ESRGAN, UniHIR, TADiSR, DocRes, DocDiff,
+Restormer hoặc source `zhconv` của OCR. Nó xác minh đích vắng mặt sau xoá và ghi
+`manifests/difftsr_retired.json`. ZIP upload cũ vẫn giữ nội dung cũ; upload các
+thư mục staging hiện tại để dùng bộ đã thay đổi.
+
+### Môi trường và cấu trúc upload
 
 Local Windows chọn interpreter/kernel `.venv/Scripts/python.exe` tại root,
 Python 3.13. [pyproject.toml](../pyproject.toml) cho phép Python `>=3.10,<3.14`,
@@ -555,7 +755,7 @@ từ CPU hay GPU local 8 GB sang Kaggle, và không dùng proxy làm kết luậ
 Một số công cụ local trong `configs/`, `scripts/`, `tools/`, `tests/` vẫn bị ignore;
 liên kết vận hành lịch sử được đối chiếu với workspace hiện có. Đợt H10 cho phép
 Git theo dõi các builder notebook, installer dependency và các test cần cho thay
-đổi này. Đợt ảnh mở rộng đã thêm source/archive nhỏ, weights DocRes/DocDiff và
+đổi này. Đợt ảnh mở rộng đã thêm source, weights DocRes/DocDiff và
 runtime metadata; chưa upload hoặc dựng lại ZIP models/packages lớn.
 
 ## Chuyển dataset giữa hai phiên Kaggle

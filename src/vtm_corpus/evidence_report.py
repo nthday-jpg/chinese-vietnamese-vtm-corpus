@@ -112,6 +112,15 @@ def book_variant_stability(diagnostic):
     html = '<section id="variant-stability"><h2>Độ ổn định qua biến thể ảnh</h2>'
     html += '<p>So sánh trong từng engine; mỗi biến thể có đồng thuận bốn engine riêng. Biến thể không tăng số phiếu độc lập. Chữ gốc và mọi phương án được giữ nguyên.</p>'
     html += '<pre>'+escape(json.dumps(diagnostic['summary'], ensure_ascii=False, indent=2))+'</pre>'
+    if diagnostic.get('groups'):
+        html += '<p>Tỷ lệ tách theo cơ chế và từng engine. Nhóm sensitivity có thể đổi glyph; không là độ bất biến bảo toàn nội dung.</p>'
+        html += '<pre>'+escape(json.dumps(diagnostic['groups'], ensure_ascii=False, indent=2))+'</pre>'
+        html += '<details><summary>Thống kê cùng vùng canonical</summary><pre>'+escape(json.dumps(
+            diagnostic.get('region_groups', {}), ensure_ascii=False, indent=2))+'</pre></details>'
+        html += '<details><summary>Hai trục đồng thuận và ổn định; chưa biết đúng/sai</summary><pre>'+escape(json.dumps(
+            diagnostic.get('consensus_stability_axes', []), ensure_ascii=False, indent=2))+'</pre></details>'
+        html += '<details><summary>Nhiều engine cùng đổi cách đọc</summary><pre>'+escape(json.dumps(
+            diagnostic.get('joint_changes', []), ensure_ascii=False, indent=2))+'</pre></details>'
     html += '<div class="scroll"><table><thead><tr><th>Biến thể</th>'
     engines = list(next(iter(diagnostic['matrix'].values())))
     html += ''.join('<th>'+escape(e)+'</th>' for e in engines)+'</tr></thead><tbody>'

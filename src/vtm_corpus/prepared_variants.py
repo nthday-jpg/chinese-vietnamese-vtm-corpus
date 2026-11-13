@@ -6,27 +6,10 @@ from math import isclose, isfinite
 
 from .image_dataset import (dataset_hash, dataset_read, dataset_load_image, dataset_page,
                             dataset_validate_page)
+from .restoration_registry import VARIANT_SPECS, preparation_region_review
 
 
-OCR_IMAGE_VARIANTS = {
-    "original": (1, "source_observation"),
-    "clahe": (1, "deterministic_transformation"),
-    "bicubic_x2": (2, "deterministic_transformation"),
-    "bicubic_x4": (4, "deterministic_transformation"),
-    "denoised": (1, "deterministic_transformation"),
-    "realesrgan_x4": (4, "neural_restoration"),
-    "tadisr_x4": (4, "neural_restoration"),
-    "difftsr": (None, "neural_restoration"),
-    "unihir_restoration": (1, "generative_reconstruction"),
-    **dict.fromkeys((
-        'grayscale_luma', 'grayscale_red', 'grayscale_green', 'grayscale_blue',
-        'lab_l', 'lab_a', 'lab_b', 'red_ink', 'background_normalized',
-        'sauvola', 'niblack', 'bilateral', 'unsharp'), (1, 'deterministic_transformation')),
-    **dict.fromkeys((
-        'docres_appearance', 'docres_deblurring', 'docres_deshadowing', 'docres_binarization',
-        'docdiff_deblurring', 'restormer_motion_deblurring', 'restormer_defocus_deblurring',
-        'restormer_real_denoising', 'restormer_gaussian_denoising'), (1, 'neural_restoration')),
-}
+OCR_IMAGE_VARIANTS = {name: (spec[0], spec[1]) for name, spec in VARIANT_SPECS.items()}
 
 RESTORATION_FAILURE_STATES = {
     'failed', 'missing_assets', 'runtime_incompatible', 'inference_failed',
@@ -53,13 +36,21 @@ def restoration_index(root, descriptor):
     canonical = {k: v for k, v in descriptor.items() if k not in {"restoration", "snapshot_id"}}
     if dataset_hash(canonical) != report.get("canonical_snapshot"):
         raise ValueError("Restoration canonical snapshot mismatch")
-    rows, counts = {}, {}
+    rows, counts, aliases = {}, {}, {}
+    allowed_aliases = {(p['book'], p['source_sha256'], p['page']) for p in descriptor['pages']}
     for line in dataset_read(root, report["manifest"]).splitlines():
         row = json.loads(line)
         key = (row["source_sha256"], row["page_index"], row["region_id"], row["variant"])
-        if key in rows or row.get("page") != row["page_index"] + 1:
+        if row.get("page") != row["page_index"] + 1 or (row['book'], row['source_sha256'], row['page_index']) not in allowed_aliases:
             raise ValueError("Duplicate/invalid restoration region identity")
-        rows[key] = row
+        if row['book'] in aliases.get(key, set()):
+            raise ValueError('Duplicate restoration row for the same book alias')
+        if key in rows and any(row.get(k) != rows[key].get(k) for k in (
+                'state', 'image', 'canonical_image', 'source_image', 'source_box', 'crop_type',
+                'reading_order', 'operation', 'parameters', 'provenance')):
+            raise ValueError('Conflicting restoration results for identical source aliases; select one alias per source PDF')
+        aliases.setdefault(key, set()).add(row['book'])
+        rows.setdefault(key, row)
         state = row.get("state")
         if state not in {"ok", "not_applicable", "skipped_by_configuration"} | RESTORATION_FAILURE_STATES:
             raise ValueError("Invalid restoration variant state")
@@ -74,7 +65,7 @@ def restoration_index(root, descriptor):
                 if key not in rows:
                     raise ValueError("Restoration manifest silently omits selected variant/region")
                 row = rows[key]
-                if (row.get("book") != page["book"] or row.get("source_image_hash") != rec["source"]["sha256"]
+                if (page['book'] not in aliases[key] or row.get("source_image_hash") != rec["source"]["sha256"]
                         or row.get("source_image") != rec["source"]
                         or row.get("canonical_image") != region["images"]["original"]
                         or any(row.get(k) != region[k] for k in ("source_box", "crop_type", "reading_order"))):
@@ -112,6 +103,9 @@ def variant_region_entry(root, descriptor, record, region, variant, *, index=Non
         raise VariantUnavailable([{"region": region["id"], "variant": variant, "state": "missing_variant"}])
     if row["state"] != "ok":
         raise VariantUnavailable([{k: row.get(k) for k in ("region_id", "variant", "state", "reason")}])
+    if variant == 'degan_watermark_removal' and not preparation_region_review(
+            row['book'], row['page_index'], row['region_id'], report['configuration']).get('watermark_removal_approved'):
+        raise ValueError('DE-GAN watermark-removal region approval is unverified')
     if variant == "difftsr":
         review = report["configuration"].get("reviewed_regions", {}).get(
             f'{row["book"]}:{row["page"]}:{row["region_id"]}', {})
@@ -159,14 +153,30 @@ def resolve_variant_page(root, descriptor, record, cfg, *, index=None, report=No
     return record
 
 
+def ocr_input_asset_identity(entry):
+    """Keep the existing pixel/config identity independent of new report annotations."""
+    result = {k: v for k, v in entry.items() if k in {
+        'sha256', 'pixel_sha256', 'size', 'mode', 'image_to_source',
+        'provenance', 'model_identity', 'operation', 'coordinate_mapping_evidence'}}
+    if 'operation' in result:
+        result['operation'] = {k: v for k, v in result['operation'].items() if k not in {
+            'method_family', 'algorithm', 'perturbation_class', 'provenance', 'scale',
+            'resources', 'threshold_tie_epsilon'}}
+    return result
+
+
 def bind_restoration_variant(cfg, root, descriptor, source_sha, pages, *, allow_unavailable=False):
     """Do not put other selected variants into this variant's cache identity."""
     index, report = restoration_index(root, descriptor)
     states, identity = {}, []
     # Identity covers this source's input assets, independent of OCR page selection.
+    seen_pages = set()
     for page in descriptor["pages"]:
         if page["source_sha256"] != source_sha:
             continue
+        if page['page'] in seen_pages:
+            continue
+        seen_pages.add(page['page'])
         record = dataset_page(root, descriptor, source_sha, page["page"])
         layout = dataset_validate_page(root, record)
         if layout['reading_direction'] != cfg.reading_direction:
@@ -181,9 +191,7 @@ def bind_restoration_variant(cfg, root, descriptor, source_sha, pages, *, allow_
             # Metadata such as wall time, cache receipts and old filesystem
             # locations is not input to OCR and must not invalidate its output.
             for asset in assets:
-                asset['image'] = {k: v for k, v in asset['image'].items() if k in {
-                    'sha256', 'pixel_sha256', 'size', 'mode', 'image_to_source',
-                    'provenance', 'model_identity', 'operation', 'coordinate_mapping_evidence'}}
+                asset['image'] = ocr_input_asset_identity(asset['image'])
             identity.append({"page": page["page"], "source": record["source"], "assets": assets})
             states[page["page"]] = {"state": "ok"}
         except VariantUnavailable as exc:

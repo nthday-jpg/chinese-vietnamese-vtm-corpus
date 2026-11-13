@@ -7,14 +7,15 @@ from pathlib import Path
 
 from .config import OCRConfig
 from .corpus_ocr import prepare_multi_corpus, write_json
-from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path
+from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path, dataset_hash
 from .prepared_variants import OCR_IMAGE_VARIANTS, variant_region_entry
 from .multi_compare import compare_multi_corpus
 from .ocr_records import load_run, read_checkpoint_campaign
 from .pdf_images import acquire_pdf_image
 from .spatial_coverage import analyze_spatial_coverage, spatial_settings
-from .variant_stability import analyze_variant_stability, stability_settings
-from .restoration_evaluation import evaluate_restoration_page, restoration_evaluation_settings
+from .variant_stability import analyze_variant_stability, stability_settings, stability_mechanism_groups
+from .restoration_evaluation import evaluate_restoration_page, restoration_evaluation_settings, restoration_comparison_config
+from .restoration_registry import SURVEY_SOURCE_GROUPS
 
 
 def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, cache_renders=True):
@@ -173,7 +174,7 @@ def variant_difference_artifacts(image, stability, manifests_by_variant, row, di
 def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable_spatial=False,
                              spatial_options=None, stability_options=None, enable_restoration_ablation=False,
                              enable_visual_fidelity=False, restoration_options=None, prepared_dataset=None,
-                             evidence_dir=None, **comparison_options):
+                             evidence_dir=None, book_groups=None, **comparison_options):
     manifest_path = Path(manifest_path)
     campaign = read_checkpoint_campaign(manifest_path)
     p = stability_settings(stability_options)
@@ -224,10 +225,15 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
         directory = artifact_root/hashlib.sha256(book.encode()).hexdigest()[:12]/f'p{page+1:05d}'
         if enable_multi_variant:
             row['variant_stability'] = analyze_variant_stability(records, result['models'], options=p,
-                input_states={v: {e: pages.get(page) for e, pages in books[book].items()} for v, books in states.items()})
+                input_states={v: {e: pages.get(page) for e, pages in books[book].items()} for v, books in states.items()},
+                configuration_identities={v: {e: dataset_hash(restoration_comparison_config(m['config'],
+                    comparison_options.get('reading_order', 'auto'))) for e, m in res['manifests'][book].items()}
+                    for v, res in results.items()})
             source_info = next(iter(result['manifests'][book].values())).get('books', {}).get(book, {})
             row['variant_stability']['source'] = {'book': book, 'page': page+1,
                 'source_sha256': source_info.get('sha256'), 'source_verified': row['source_verified']}
+            row['variant_stability']['book_group'] = ((book_groups or {}).get(book) or
+                SURVEY_SOURCE_GROUPS.get(source_info.get('sha256'), 'unclassified'))
             if p['compare_across_engines']:
                 row['variant_consensus'] = {v: next(r for r in res['rows'] if r['book'] == book and r['page'] == page+1)
                                           for v, res in results.items() if v != reference}
@@ -306,7 +312,25 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
         result['stability_summary'] = {k: sum(s[k] for s in summaries) for k in
             ('measured_pairs', 'exact_agreement_pairs', 'changed_pairs', 'unresolved_alignments', 'missing_pairs')}
         s = result['stability_summary']
-        s['exact_agreement_rate'] = s['exact_agreement_pairs']/s['measured_pairs'] if s['measured_pairs'] else None
+        s['exact_agreement_rate'] = None
+        s['rate_scope'] = 'grouped_by_mechanism_and_engine_only'
+        grouped, seen = {}, set()
+        for row in result['rows']:
+            d = row['variant_stability']; sha = d['source']['source_sha256']
+            identity = (sha, row['page']) if sha else (row['book'], row['page'])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            grouped.setdefault(d['book_group'], []).append(d)
+        s['by_book_group'] = {g: dict(unique_source_pages=len(ds),
+            groups=stability_mechanism_groups([c for d in ds for c in d['comparisons']], result['models']),
+            region_groups=stability_mechanism_groups([{**r, **{k:c[k] for k in (
+                'engine','variant','method_family','perturbation_class')}} for d in ds
+                for c in d['comparisons'] for r in c['regions']], result['models']))
+            for g, ds in grouped.items()}
+        s['groups'] = stability_mechanism_groups([c for ds in grouped.values() for d in ds
+            for c in d['comparisons']], result['models'])
+        s['book_group_policy'] = 'analyst override or observed source SHA256; aliases deduplicated by source/page; unknown hashes unclassified'
     return result
 
 

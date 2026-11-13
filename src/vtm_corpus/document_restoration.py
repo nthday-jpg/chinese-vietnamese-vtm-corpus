@@ -10,9 +10,14 @@ import ast
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
+from .learned_document_restoration import learned_document_load, learned_document_run
 
 
 DOCUMENT_VARIANTS = {
+    'docentr_binarization': ('docentr', 'binarization_base_2018_patch8', 'model_8_2018_base.pt'),
+    'degan_binarization': ('degan', 'binarization', 'degan_weights.bundle'),
+    'degan_deblurring': ('degan', 'deblurring', 'degan_weights.bundle'),
+    'degan_watermark_removal': ('degan', 'watermark_removal', 'degan_weights.bundle'),
     'docres_appearance': ('docres', 'appearance', 'docres.pkl'),
     'docres_deblurring': ('docres', 'deblurring', 'docres.pkl'),
     'docres_deshadowing': ('docres', 'deshadowing', 'docres.pkl'),
@@ -54,6 +59,8 @@ def docres_prompt_module(vendor):
 
 
 def document_load(model, assets, options):
+    if model.startswith(('docentr_', 'degan_')):
+        return learned_document_load(model, assets, options)
     import torch
     family, task, _ = DOCUMENT_VARIANTS[model]
     vendor = Path(assets['vendor'])
@@ -136,6 +143,8 @@ def document_tiled(tensor, predict, tile, overlap):
 
 
 def document_run(model, backend, image, options):
+    if model.startswith(('docentr_', 'degan_')):
+        return learned_document_run(model, backend, image, options)
     import cv2
     import numpy as np
     import torch

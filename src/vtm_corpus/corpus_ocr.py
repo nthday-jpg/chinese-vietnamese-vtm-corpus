@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import uuid
+from threading import Lock
 
 from tqdm.auto import tqdm
 
@@ -20,6 +21,7 @@ from .ocr_worker import load_results
 from .pipeline import _run_dir, list_pdfs, parse_pages, select_entries
 from .worker_paths import to_wsl_path
 from .image_dataset import bind_image_dataset
+from .gpu_execution import gpu_worker_environment, validate_ocr_gpu_map, run_gpu_task_waves
 
 
 def now() -> str:
@@ -265,7 +267,7 @@ def corpus_worker_command(first: dict, manifest_path: Path, engine: str, token: 
             "--manifest", str(manifest_path), "--engine", engine], None
 
 
-def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
+def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cancel_event=None) -> dict:
     """Blocking notebook call. The child process owns and releases the GPU model."""
     if engine not in {"hunyuan", "paddle", "ppocr", "tonggu"}:
         raise ValueError("engine phải là hunyuan, paddle, ppocr hoặc tonggu")
@@ -278,12 +280,17 @@ def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
     if progress["missing"] == 0:
         print(f"{engine}: đã có đủ {progress['done']:,} trang cùng cấu hình; dùng lại kết quả.")
         return progress
-    with gpu_lock(manifest_path.parent):
+    lock_dir = manifest_path.parent if gpu is None else manifest_path.parent / 'gpu_locks' / str(gpu)
+    with gpu_lock(lock_dir):
         log = manifest_path.parent / f"{engine}_notebook.log"
-        state_path = manifest_path.parent / "status.json"
+        state_path = manifest_path.parent / ("status.json" if gpu is None else f"{engine}_status.json")
         started = time.monotonic()
         environment = os.environ.copy()
         environment.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        if gpu is not None:
+            if first.get('worker_wsl_distro'):
+                raise ValueError('Parallel GPU mapping requires native Linux workers; use sequential for WSL')
+            environment = gpu_worker_environment([gpu], environment)
         environment["VTM_OCR_ATTEMPT"] = uuid.uuid4().hex
         environment["PYTHONPATH"] = os.pathsep.join([
             str(Path(__file__).resolve().parents[1]), *first.get("worker_pythonpath", []),
@@ -292,6 +299,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
         restarts = 0
         with tqdm(total=progress["pages"], initial=progress["done"], desc=f"OCR {engine}", unit="trang") as bar:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError('Parallel OCR cancelled')
                 worker_token = uuid.uuid4().hex
                 command, pid_file = corpus_worker_command(first, manifest_path, engine, worker_token)
                 # Explicit argument also works across the Windows -> WSL boundary.
@@ -303,6 +312,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
                                                start_new_session=os.name != "nt")
                 try:
                     while process.poll() is None:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise InterruptedError('Parallel OCR cancelled')
                         time.sleep(1)
                         with log.open(encoding="utf-8", errors="replace") as stream:
                             stream.seek(offset)
@@ -319,7 +330,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
                         bar.n = progress["done"]
                         bar.refresh()
                         write_json(state_path, {"status": "running", "active_engine": engine,
-                                   "workflow": "notebook_sequential_models", "pid": os.getpid(),
+                                   "workflow": "notebook_parallel_models" if gpu is not None else "notebook_sequential_models",
+                                   "gpu": gpu, "pid": os.getpid(),
                                    "worker_pid": process.pid, "updated": now(), **progress})
                         if time.monotonic() - started > budget:
                             raise TimeoutError(f"{engine}: vượt ngân sách {budget / 3600:g} giờ; kết quả đã xong được giữ lại.")
@@ -352,3 +364,38 @@ def run_corpus_engine(manifest_path: str | Path, engine: str) -> dict:
                    "active_engine": None, "completed_engine": engine, "updated": now(), **progress})
     print(f"{engine}: {progress['done']:,}/{progress['pages']:,} trang có output; worker đã thoát và giải phóng model.")
     return progress
+
+
+def run_corpus_engines(manifest_path, engines, gpu_map):
+    """Run identical corpus selections concurrently, retaining per-engine failures."""
+    gpu_map = validate_ocr_gpu_map(engines, gpu_map)
+    errors = {}
+    error_lock = Lock()
+    path = Path(manifest_path)
+
+    def run_one(engine, cancel):
+        try:
+            return run_corpus_engine(manifest_path, engine, gpu=gpu_map[engine], cancel_event=cancel)
+        except Exception as exc:
+            if cancel.is_set():
+                raise
+            with error_lock:
+                errors[engine] = dict(error=type(exc).__name__, message=str(exc), updated=now())
+                write_json(path.parent / 'stage_errors.json', errors)
+            return {**engine_progress(manifest_path, engine), 'status': 'error'}
+
+    with gpu_lock(path.parent):
+        write_json(path.parent / 'stage_errors.json', errors)
+        write_json(path.parent / 'status.json', dict(status='running', workflow='notebook_parallel_models',
+                   gpu_map=gpu_map, updated=now()))
+        try:
+            results = run_gpu_task_waves([(name, [gpu_map[name]]) for name in engines], run_one,
+                                        list(gpu_map.values()))
+        except BaseException:
+            write_json(path.parent / 'status.json', dict(status='interrupted', workflow='notebook_parallel_models',
+                       gpu_map=gpu_map, updated=now()))
+            raise
+        write_json(path.parent / 'status.json', dict(status='partial' if errors or any(
+            result.get('missing', 0) for result in results.values()) else 'complete',
+            workflow='notebook_parallel_models', gpu_map=gpu_map, updated=now()))
+    return results, errors

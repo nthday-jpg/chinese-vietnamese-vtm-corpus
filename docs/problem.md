@@ -1,5 +1,25 @@
 # Bài toán và giới hạn
 
+## Ba nhóm đã quan sát trên ảnh thật
+
+Khảo sát 12/11/2026 ở HEAD `6dd370b`: 15 cặp tên sách/trang, 13 trang nguồn độc
+lập. G1 (`1`–`6`) là scan màu hai trang viết dọc, nét biến thiên như viết tay,
+chữ nhỏ và dấu đỏ, giấy xám vàng/rãnh gáy/viền sờn. G2 (`bien`) là bản in ngang,
+nền gần trắng, chữ nhỏ và đốm lề. G3 (`kinh`) là bản in dọc có khung/cột chú giải,
+nhiều pixel đen/trắng bão hòa. Không mặc định chúng cần cùng restoration.
+
+`2.pdf`/`3.pdf` trùng SHA-256; `4.pdf`/`5.pdf` cũng trùng. Không tính alias thành
+nguồn độc lập. Phân nhóm dựa trên ảnh và hash, không chỉ tên. Chưa xác nhận
+bleed-through hoặc phân biệt motion/defocus/JPEG bằng chứng đủ mạnh.
+Kích thước scan thật G1 chỉ 600–650 pixel cạnh dài; `bien` scan 736×1120,
+`kinh` ảnh nhúng chính 1472×2144, canvas canonical profile hiện có 1595×2206.
+Pixel render không đồng nghĩa số pixel chi tiết nguồn.
+
+Xem [báo cáo khả thi](../reports/restoration_feasibility.md) và manifest mẫu
+để đọc giới hạn lấy mẫu, ảnh đại diện và cơ sở từng nhận xét. Không có nhãn OCR
+chuẩn; A là khảo sát Utility qua output/vùng/cost, B là prediction stability
+trong engine theo cơ chế. Cả hai không tự đo accuracy.
+
 Corpus gồm tám bộ sách, bảy bộ chủ yếu chữ dọc. Vùng một cột lớn phía trên và
 hai cột chú thích nhỏ phía dưới được giữ nguyên nếu không có đường cắt đáng tin
 cậy. Phục hồi ảnh tổng quát không cần tách glyph. Xoay cả cột 90° làm xoay từng
