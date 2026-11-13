@@ -1,5 +1,111 @@
 # Vận hành và kiểm chứng
 
+## Log mới: build FlashAttention hết 90 phút — 13/11/2026
+
+Lượt `restoration_check_20261113_124652_5a3affce` đã qua hardware bốn L4,
+nạp shared definitions và kiểm tra asset UniHIR; bốn wheel overlay đã cài thành
+công. Dataset models/packages không còn mục thiếu trong inventory. Build
+FlashAttention bắt đầu cho `sm_89`, nhưng supervisor dừng ở 5.400 giây.
+Chưa build xong, chưa CUDA probe, chưa load weights hoặc inference UniHIR.
+Log cũ chưa verbose nên không xác định được compiler đang ở kernel nào.
+[Audit của lượt chạy](../reports/restoration_survey/kaggle_native_build_timeout_2026_11_13.json)
+ghi riêng các bước đã đạt và các bước chưa chạy.
+
+Helper mới bỏ giới hạn cố định hai job. Mặc định chọn tối đa tám job theo CPU
+affinity và RAM khả dụng (kể cả cgroup), chừa 25% RAM và tính 12 GiB/job; NVCC
+hai thread/job. Áp công thức vào cấu hình trong log chọn tám job. Đây là cấu
+hình cải thiện, không phải kết quả đo tốc độ hoặc cam kết build xong trong 90 phút.
+Không đổi source FlashAttention, Torch, CUDA hoặc model loader.
+
+`pip wheel --verbose` ghi log compiler/Ninja; heartbeat 30 giây lưu tiến độ vào
+`build_progress.json`, tài nguyên và cờ build vào `build_config.json`.
+Notebook 0 thu thêm hai file này và `build.ninja`/`.ninja_log` dưới tên TXT ngắn.
+Mã điều khiển `MAX_JOBS` được upstream mô tả trong
+[README FlashAttention](https://github.com/Dao-AILab/flash-attention#installation-and-features).
+
+Chỉ cập nhật packages (runtime helper mới và `unihir_runtime.json`) cùng các ô
+helper Notebook 0 mới; giữ Dataset models và `fa.bundle`. Để bỏ lặp lại probe
+môi trường đã đạt, đặt `RUN_PROBES=False`. Có thể chạy `build_and_probe` trước
+rồi `unihir_smoke` trong cùng kernel/runtime để dùng lại build đã đạt.
+Phiên mới vẫn phải build nếu chưa có wheel tương thích được đưa vào packages.
+`total_timeout_seconds=5400` vẫn giữ nguyên và sửa được trong cấu hình.
+Nếu cần giảm số job, đặt `os.environ['VTM_FLASH_MAX_JOBS']='4'` trước khi chạy;
+helper vẫn áp giới hạn CPU/RAM. Không cần tải lại model hoặc hạ package kernel.
+
+## Giữ nguyên Dataset models hiện tại trên Kaggle
+
+Không cập nhật Dataset models. Notebook 0/1 tiếp tục kiểm tra và nạp đúng các
+file đã upload, gồm `degan/degan_weights.bundle` cùng member manifest. Phần sửa
+loader DE-GAN để đọc ba file HDF5 local đã được hoàn tác; loader mô hình giữ
+nguyên như trước đợt dọn archive. Việc giải nén models local không bắt buộc đổi
+định dạng model trên Kaggle và không tái tạo archive trong thư mục local.
+
+**Chỉ cập nhật Dataset packages** để có archive FlashAttention tên ngắn
+`sources/runtime/fa.bundle`, manifest và runtime helper tương ứng. Dùng Notebook 0/1 đã đồng bộ lại;
+bản sửa lỗi `load_shared_definitions`, kiểm build/CUDA và cấu hình bốn L4 vẫn giữ.
+
+## FlashAttention dùng archive tên ngắn
+
+FlashAttention đã quay lại dạng archive trước đợt giải nén, dùng tên `fa.bundle`
+để tránh giới hạn tên/đường dẫn khi upload. Nội dung là nguyên bản sdist upstream
+8.453.127 byte, SHA-256 `d0f9f0b08a986cdeadbffcf5ec8b3a8f514366c68ad1853d3ab061bc83cc340b`.
+Runtime kiểm hash rồi giải nén trong thư mục writable của Kaggle. Thư mục source
+bung sẵn có 6.614 file đã được kiểm và bỏ khỏi thư mục upload.
+
+Hai ZIP upload cũ đã được đối chiếu CRC và xoá; metadata cũ khác bản hiện tại được giữ ở
+`work/unpacked_legacy_metadata/`, không ghi đè cấu hình đang dùng.
+
+- FlashAttention: `packages/image_restoration/sources/runtime/fa.bundle`,
+  khai báo trong `manifests/flash_source_archive.json` và `unihir_runtime.json`.
+  Không bung archive này trước khi upload; giữ tên ngắn và đuôi `.bundle`.
+- DE-GAN local: `models/image_restoration/degan/weights/` chứa ba file HDF5 gốc.
+  Không upload thư mục này thay Dataset models hiện tại; loader trên Kaggle tiếp
+  tục dùng archive và member hash đã có.
+- Giữ `.whl` để pip cài offline. Không bung nội dung wheel vào Dataset.
+
+Chỉ upload packages hiện tại và dùng Notebook 0/1 mới. Không cập nhật models.
+Archive FlashAttention được giữ để build offline; không tải lại model lớn.
+
+## Kết quả hai log Kaggle và bản sửa Notebook 0 — 13/11/2026
+
+Hai lượt `build_and_probe` và `unihir_smoke` dừng tại `load_shared_definitions`
+với lỗi `NoneType ... __dict__`: module chứa các dataclass nhúng chưa được đăng
+ký trong `sys.modules`. Chưa lượt nào bắt đầu build FlashAttention, load weights
+hoặc inference. Notebook 0 đã sửa việc đăng ký và dọn module, dùng nguyên các
+định nghĩa của Notebook 1; không cần sửa pixel hoặc nạp lại model để kiểm tra lỗi này.
+
+Log **lần sau** (`restoration_check_20261113_105204_981d36b6`) đã thấy đầy đủ
+models theo manifest và kích thước; phần thiếu năm họ models chỉ có ở lần đầu.
+Kernel Torch 2.11/CUDA 13 trên bốn L4, compiler, Keras Torch/HDF5 và các tensor
+ops đã đạt. Thiếu PDFium/vit-pytorch trong kernel được bù bởi wheel offline;
+Paddle/MMCV thuộc runtime OCR riêng, không cần cài vào kernel của Notebook 1.
+Các xung đột `pip check` của Colab/Gradio/MoviePy không phải yêu cầu của restoration.
+
+Dataset packages của cả hai lượt thiếu đúng archive source FlashAttention.
+Local đã khôi phục nguyên bản archive upstream và kiểm SHA-256. File
+`sources/runtime/fa.bundle` được giữ cho upload; `unihir_runtime.json` trỏ vào
+file này và helper giải nén/build offline.
+Chưa xác minh upload/build mới trên Kaggle.
+
+**Cập nhật Dataset packages từ `kaggle_upload/packages/` hiện tại**, gồm cả
+file `fa.bundle` và manifest, rồi thay Notebook 0 bằng bản đã sửa. Không cần tải
+lại UniHIR hoặc cập nhật Dataset models của lượt smoke sau.
+Chạy `RESTORATION_GPU_CHECK='unihir_smoke'` trên bốn L4: chế độ này bao gồm build,
+CUDA probe và thử một trang, nên không bắt buộc chạy lại cả hai chế độ. Gửi
+`restoration_check_*_logs.zip`. Giữ phạm vi Notebook 1 một trang; chưa xác nhận
+sẵn sàng cho `all_eligible` có UniHIR trước khi kiểm GPU đạt.
+
+Script sửa transport local có thể chạy lại, kiểm checksum và không tải mạng:
+
+```powershell
+.venv/Scripts/python.exe -X utf8 tools/prepare_kaggle_offline.py --repair-upload-only
+```
+
+Notebook 0 cũng đã bỏ cảnh báo thiếu bytecode `__pycache__/*.pyc` tùy sinh và
+chỉ đọc METADATA cấp gốc của wheel setuptools, không nhầm metadata thư viện
+vendored là wheel hỏng. Bản sửa không bỏ qua source `.py`, native library,
+checksum hoặc file weights. [Chi tiết audit](../reports/restoration_survey/kaggle_readiness_2026_11_13.json).
+
 ## Toàn bộ phương pháp đã tích hợp — 13/11/2026
 
 Notebook 1 mặc định `VARIANT_MODE='all_eligible'`, chạy độc lập mọi CPU/neural
@@ -11,15 +117,18 @@ liệu vẫn mặc định một sách/một trang; không tự downscale, deske
 
 ```text
 kaggle_upload/models/image_restoration/docentr/model_8_2018_base.pt
-kaggle_upload/models/image_restoration/degan/degan_weights.bundle
+kaggle_upload/models/image_restoration/degan/weights/binarization_generator_weights.h5
+kaggle_upload/models/image_restoration/degan/weights/deblur_weights.h5
+kaggle_upload/models/image_restoration/degan/weights/watermark_rem_weights.h5
 kaggle_upload/packages/image_restoration/sources/docentr/
 kaggle_upload/packages/image_restoration/sources/degan/
 kaggle_upload/packages/image_restoration/wheels/
 kaggle_upload/packages/image_restoration/manifests/learned_documents_runtime.json
 ```
 
-DE-GAN `.bundle` là ZIP chứa ba weights HDF5 gốc, giữ một bản duy nhất. Worker
-kiểm hash và giải nén riêng task vào thư mục tạm writable. Keras 3 dùng backend
+Dataset models Kaggle giữ `degan_weights.bundle`; worker kiểm member hash rồi
+giải nén đúng task vào thư mục writable trước khi nạp như loader trước đây.
+Keras 3 dùng backend
 Torch trong worker riêng; không cài TensorFlow 1.x hoặc hạ Torch/NumPy. DocEnTR
 dùng BinModel/vit-pytorch 0.24.3, base/patch 8. Cả hai dùng patch 256 không resize/
 rotate; bỏ padding về kích thước nguồn. Chưa xác minh inference GPU trên Kaggle.
@@ -420,8 +529,7 @@ Probe compiler/C extension, NumPy bridge, CUDA và `mmcv.ops.nms_rotated` trên 
 phải đạt trước OCR. Cache native wheel gắn identity source/Python/NumPy/Torch/
 CUDA/compiler/cờ build và hash; chạy lại Setup có thể dùng component đã xác minh
 trong cùng phiên. `TORCH_CUDA_ARCH_LIST=12.0` chỉ phù hợp GPU đích đã xác nhận.
-TongGu local cần WSL/Linux Python riêng qua `ADVANCED['tonggu_repo']`,
-`tonggu_python`, `tonggu_wsl_distro`; ánh xạ `C:` → `/mnt/c`, chưa hỗ trợ UNC.
+Notebook 3 chỉ dùng worker Linux trên Kaggle; không có cấu hình Windows/WSL.
 
 Giữ `runtime_config.json`, `notebook_setup_receipt.json`, `build_logs/`,
 `build_probe/toolchain.json`, `.vtm_kernel_plan.json`, `.vtm_opencv_payload.json`
@@ -432,11 +540,10 @@ bản vá NCCL hay `sources_upload_test.zip` không thay bộ packages đầy đ
 
 ## Chuẩn bị ảnh
 
-Trong notebook 1, dùng `RUN_MODE='process'`, điền ba đường dẫn tài sản và giữ
+Trong notebook 1, điền ba đường dẫn Dataset Kaggle và giữ
 `BOOKS=['1']`, `PAGES='1'`, `LIMIT=1`, `MAX_BOOKS=1`. Bắt đầu chỉ với
-`VARIANTS=['original']`, sau đó thêm classical/biến thể cần so. Chế độ process
-chỉ dùng tài sản local; tải tài sản là chế độ `prepare_assets` riêng trên máy
-local với các cờ cho phép mạng. `RUN_SELF_TESTS`, `VALIDATE_OUTPUT` và
+`VARIANTS=['original']` với `VARIANT_MODE='selected'`, sau đó thêm classical/biến thể cần so.
+Notebook chỉ đọc tài sản đã gắn, không có chế độ tải asset. `RUN_SELF_TESTS`, `VALIDATE_OUTPUT` và
 `EXPORT_PREVIEWS` hỗ trợ kiểm tra trước khi chuyển dataset.
 
 Mặc định có `CROP_TYPES=['page','group','column']`, `RESUME=True`,
@@ -879,3 +986,8 @@ trình bày như một phương pháp đã hoạt động.
 | Module được sửa | Trong `src/vtm_corpus/`: `image_dataset.py`, `prepared_variants.py`, `config.py`, `corpus_ocr.py`, `image_preparation.py`, `ocr_records.py`, `multi_compare.py`, `evidence_pipeline.py`, `evidence_report.py`, `book_output.py`. |
 | Bảo trì notebook | Trong `tools/`: `notebook_source_builder.py`, `notebook_ocr_workflow.py`, `rebuild_plain_ocr_notebook.py`; cho phép theo dõi cả `update_kaggle_notebook_bootstrap.py`, `install_kaggle_packages.py` để builder không thiếu dependency trong checkout sạch. |
 | Kiểm thử và Git | `.gitignore`; trong `tests/`: thêm `test_restoration_evaluation.py`, cập nhật `test_image_dataset.py`, `test_character_consensus.py`, `test_notebook_bootstrap.py`, cho phép theo dõi helper `test_notebook_sources.py`. |
+
+
+### Runtime của notebook 0, 1 và 3
+
+Ba notebook chỉ chạy trên Kaggle với Internet Off. Gắn Dataset packages, models và PDF trước khi Run All; output nằm trong `/kaggle/working`, runtime tạm trong `/tmp`. Không có chế độ chạy local, tải asset qua Internet hoặc worker Windows/WSL trong notebook. Các công cụ chuẩn bị asset riêng không thuộc luồng chạy notebook. `RUN_OCR=False` ở notebook 3 vẫn cho phép đọc checkpoint đã gắn vào Kaggle.
