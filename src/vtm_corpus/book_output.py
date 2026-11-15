@@ -361,6 +361,10 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
 
 
 def export_corpus_results(result, output_dir, *, include_crops=True, create_zip=True, dpi=250, renderer=None):
+    if result.get('crop_results'):
+        return [{**artifact,'crop_type':kind} for kind,child in result['crop_results'].items()
+                for artifact in export_corpus_results(child,Path(output_dir)/kind,include_crops=include_crops,
+                    create_zip=create_zip,dpi=dpi,renderer=renderer)]
     books = list(dict.fromkeys(row['book'] for row in result['rows']))
     names = [book_output_slug(book) for book in books]
     if len({name.casefold() for name in names}) != len(names):

@@ -122,6 +122,7 @@ def multi_tables(result):
                       "Đã định vị": sum(x["localization"] is not None for x in c["conflicts"]),
                       "Entropy (bit)": c["mean_entropy_bits"], "Lý do": ", ".join(row["reasons"])})
         diagnostic = row.get("page_consensus") or {}
+        if row.get('crop_type'):pages[-1]['Loại crop']=row['crop_type']
         pages[-1]["Cấu trúc trang"] = diagnostic.get("status", "not_assessed")
         pages[-1]["Dấu hiệu cấp trang"] = page_consensus_summary(diagnostic)
         pages[-1]["Không bỏ phiếu"] = "; ".join(f"{name}: {', '.join(issues)}" for name, issues in c.get("excluded_models", {}).items())
@@ -133,6 +134,7 @@ def multi_tables(result):
             pages[-1]['Cặp biến thể đổi chữ'] = row['variant_stability']['summary']['changed_pairs']
         for conflict in c["conflicts"]:
             conflicts.append({"Sách": row["book"], "Trang": row["page"], "Cột": conflict["index"],
+                              **({'Loại crop':row['crop_type']} if row.get('crop_type') else {}),
                               **{name: "không bỏ phiếu (output cần kiểm tra)" if name in c.get("excluded_models", {}) else "chưa có output" if value is None else value or "∅"
                                  for name, value in conflict["predictions"].items()},
                               "Đa số": (conflict["majority"] or "∅") if conflict["majority"] is not None else "hòa/chưa đủ phiếu",

@@ -27,7 +27,7 @@ def checkpoint_reference(anchor, reference):
         return candidate
     # Prefer the mounted copy even when the previous session still exists.
     parts = normalized.split('/')
-    suffixes = [parts[i:] for i, value in enumerate(parts) if value in {'variant_runs', 'runs'}]
+    suffixes = [parts[i:] for i, value in enumerate(parts) if value in {'crop_runs', 'variant_runs', 'runs', 'campaigns'}]
     suffixes.append(parts[-1:])
     for suffix in suffixes:
         local = anchor.joinpath(*suffix)
@@ -42,6 +42,9 @@ def read_checkpoint_campaign(path):
     if campaign.get('variant_manifests'):
         campaign['variant_manifests'] = {v: str(checkpoint_reference(path, ref))
             for v, ref in campaign['variant_manifests'].items()}
+    if campaign.get('crop_manifests'):
+        campaign['crop_manifests'] = {v: str(checkpoint_reference(path, ref))
+            for v, ref in campaign['crop_manifests'].items()}
     for pair in campaign.get('pairs', []):
         for engine in campaign['models']:
             pair[engine] = str(checkpoint_reference(path, pair[engine]))

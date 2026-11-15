@@ -24,6 +24,7 @@ from .worker_paths import to_wsl_path
 from .image_dataset import bind_image_dataset
 from .gpu_execution import gpu_worker_environment, validate_ocr_gpu_map, run_gpu_task_waves, choose_gpu_job
 from .gpu_page_queue import GPUPageQueue
+from .ocr_checkpoint import reuse_previous_ocr
 
 
 def now() -> str:
@@ -85,7 +86,7 @@ def gpu_lock(directory: Path):
 
 def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path | None = None,
                          *, max_books: int | None = None, cache_renders=True,
-                         allow_unavailable_variants=False) -> Path:
+                         allow_unavailable_variants=False, resume_manifest=None, input_plan=None) -> Path:
     """Prepare identical selections for all configured engines; preserve model identities."""
     if len(models) < 2 or any(key != cfg.engine for key, cfg in models.items()):
         raise ValueError("Cần >= 2 model với key trùng engine, mỗi engine một cấu hình.")
@@ -136,7 +137,14 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
         prior_pairs = {pair['book']: pair for pair in prior.get('pairs', [])}
         for book, (entry, pages) in selected[first.engine].items():
             pair = {"book": book}
-            source_sha = ocr_source_sha256(entry['path'])
+            source_path=Path(entry['path'])
+            source_stat=source_path.stat() if source_path.is_file() else None
+            source_key=('pdf_sha256',str(source_path.resolve()),
+                        (source_stat.st_size,source_stat.st_mtime_ns) if source_stat else None)
+            if input_plan is not None and source_key in input_plan:source_sha=input_plan[source_key]
+            else:
+                source_sha = ocr_source_sha256(entry['path'])
+                if input_plan is not None:input_plan[source_key]=source_sha
             for base in base_configs:
                 cfg = (load_ocr_config(Path(profile_dir) / f"{entry['stem']}.json", base=base)
                        if profile_dir is not None else OCRConfig(**base.to_dict()))
@@ -150,8 +158,16 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                 cfg.limit, cfg.n_layout, cfg.fresh, cfg.resume_from = base.limit, 0, False, []
                 # Prepared content/variant identity must be bound before any
                 # prior run/checkpoint is considered reusable.
-                input_states = bind_image_dataset(cfg, source_sha, pages,
-                    allow_unavailable=allow_unavailable_variants)
+                binding_key=(cfg.image_dataset,cfg.image_variant,cfg.image_crop_type,cfg.reading_direction,
+                    cfg.image_dataset_fallback,cfg.allow_generated_variants,source_sha,tuple(pages),allow_unavailable_variants)
+                if input_plan is not None and binding_key in input_plan:
+                    input_states,bound=input_plan[binding_key]
+                    cfg.image_dataset,cfg.image_dataset_key,cfg.image_content_key=bound
+                else:
+                    input_states = bind_image_dataset(cfg, source_sha, pages,
+                        allow_unavailable=allow_unavailable_variants)
+                    if input_plan is not None:
+                        input_plan[binding_key]=(input_states,(cfg.image_dataset,cfg.image_dataset_key,cfg.image_content_key))
                 signature = (cfg.model, cfg.model_revision, cfg.dtype, cfg.device, cfg.paddle_version,
                              json.dumps(cfg.paddle_args, sort_keys=True), cfg.tonggu_repo, cfg.tonggu_config)
                 if cfg.engine in startup and signature != startup[cfg.engine]:
@@ -179,6 +195,7 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                             and source_info.get('sha256', source_sha) == source_sha):
                         directory = prior_dir
                 directory.mkdir(parents=True, exist_ok=True)
+                reused_previous=reuse_previous_ocr(resume_manifest,cfg,directory,book,source_sha,pages,corpus_model_key)
                 tasks = [{"book": book, "src": str(Path(entry["path"]).resolve()), "page": p} for p in pages]
                 if allow_unavailable_variants:
                     for task in tasks:
@@ -192,9 +209,10 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                            "created": old.get("created", now()), "updated": now(),
                            "status": "done" if count == len(pages) else "pending",
                            "books": {book: {"src": tasks[0]["src"], "pages": pages, "sha256": source_sha,
-                               "legacy_source_unverified": bool(existing) and (
-                                   old.get('books', {}).get(book, {}).get('legacy_source_unverified', False)
-                                   or not old.get('books', {}).get(book, {}).get('sha256'))}},
+                               "legacy_source_unverified": bool(count) and not (
+                                   (bool(source_sha) and old.get('books', {}).get(book, {}).get('sha256')==source_sha
+                                    and not old.get('books', {}).get(book, {}).get('legacy_source_unverified',False))
+                                   or reused_previous==count)}},
                            "tasks_total": len(pages), "tasks_selected": len(pages),
                            "counts": {"pages": len(pages), "done": count, "missing": len(pages) - count}})
                 pair[cfg.engine] = str(directory)
@@ -435,7 +453,9 @@ def run_adaptive_corpus_engines(manifest_path, engines, gpu_map):
             name = manifest['config'].get('run_name') or engine
             done = load_results(directory / 'ocr_raw', pair['book'], name)
             cached += len({t['page'] for t in tasks} & done.keys())
-            jobs.extend((engine, pair['book'], t) for t in tasks if t['page'] not in done and
+            # Each variant has a distinct run directory; book/page alone collide
+            # when a multi-variant campaign contains the same PDF several times.
+            jobs.extend((engine, str(directory.resolve()), t) for t in tasks if t['page'] not in done and
                         t.get('prepared_input', {}).get('state', 'ok') == 'ok')
             plans.append((engine, pair, directory, manifest, tasks, name))
         totals[engine] = (campaign['total_pages'], cached)

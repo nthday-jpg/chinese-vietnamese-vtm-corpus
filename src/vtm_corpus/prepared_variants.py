@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
+from functools import wraps
 from math import isclose, isfinite
+from pathlib import Path
 
 from .image_dataset import (dataset_hash, dataset_read, dataset_load_image, dataset_page,
                             dataset_validate_page)
@@ -10,6 +13,41 @@ from .restoration_registry import VARIANT_SPECS, preparation_region_review
 
 
 OCR_IMAGE_VARIANTS = {name: (spec[0], spec[1]) for name, spec in VARIANT_SPECS.items()}
+_PREPARED_INDEX_CACHE = ContextVar('prepared_index_cache',default=None)
+
+
+def cache_prepared_index(function):
+    """Validate a restoration manifest once per plan, never across notebook calls."""
+    @wraps(function)
+    def cached(*args,**kwargs):
+        if _PREPARED_INDEX_CACHE.get() is not None:return function(*args,**kwargs)
+        token=_PREPARED_INDEX_CACHE.set({})
+        try:return function(*args,**kwargs)
+        finally:_PREPARED_INDEX_CACHE.reset(token)
+    return cached
+
+
+def select_prepared_ocr_variants(dataset, selected='all', *, allow_generated=False):
+    """Read method names from Notebook 1, retaining unavailable method states."""
+    if selected != 'all':
+        if not isinstance(selected,list) or not selected or len(set(selected))!=len(selected):
+            raise ValueError("OCR_VARIANTS must be 'all' or a nonempty list of distinct methods")
+        names=list(selected)
+    else:
+        from .image_dataset import dataset_open
+        root,descriptor=dataset_open(dataset)
+        names=['original']
+        for config in descriptor.get('configurations',{}).values():names.extend(config.get('variants',[]))
+        if descriptor.get('restoration'):
+            report=json.loads(dataset_read(root,descriptor['restoration']['report']))
+            names.extend(report['selected_variants'])
+        names=list(dict.fromkeys(n for n in names if n!='tadisr_text_mask'))
+    if 'original' not in names or set(names)-OCR_IMAGE_VARIANTS.keys():
+        raise ValueError('OCR_VARIANTS requires original and supported OCR image methods; masks are excluded')
+    generated=set(names)&{'unihir_restoration','difftsr'}
+    if generated and not allow_generated:
+        raise ValueError(f'{sorted(generated)} require ALLOW_GENERATED_VARIANTS=True, or an explicit OCR_VARIANTS list excluding them')
+    return names
 
 RESTORATION_FAILURE_STATES = {
     'failed', 'missing_assets', 'runtime_incompatible', 'inference_failed',
@@ -25,6 +63,9 @@ class VariantUnavailable(ValueError):
 
 def restoration_index(root, descriptor):
     """Validate extension identity and index rows; pixels are verified when consumed."""
+    cache=_PREPARED_INDEX_CACHE.get()
+    key=(str(Path(root).resolve()),descriptor['snapshot_id'])
+    if cache is not None and key in cache:return cache[key]
     ext = descriptor.get("restoration")
     if not ext:
         return {}, None
@@ -83,6 +124,7 @@ def restoration_index(root, descriptor):
         raise ValueError("Failed restoration falsely labelled complete")
     if bool(ext.get('partial')) != bool(report.get('partial')):
         raise ValueError('Restoration extension partial status mismatch')
+    if cache is not None:cache[key]=(rows,report)
     return rows, report
 
 

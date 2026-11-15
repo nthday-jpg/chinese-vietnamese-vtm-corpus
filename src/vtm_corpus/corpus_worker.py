@@ -208,8 +208,9 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                     write_json(manifest_file, manifest)
                 else:
                     errors = errors.with_name(f'{name}_errors_{owner}.jsonl')
+                queue_key = str(directory.resolve())
                 print(f"[corpus] {engine} / {pair['book']}: {len(tasks)} trang được chọn, còn {len(todo)} trang cần OCR.", flush=True)
-                for task in (queue.pages(engine, pair['book'], owner) if queue is not None else todo):
+                for task in (queue.pages(engine, queue_key, owner) if queue is not None else todo):
                     page, started = task["page"], time.monotonic()
                     print(f"[corpus] {engine} / {pair['book']} / trang {page + 1}: "
                           f"bắt đầu (timeout={cfg.page_timeout}s).", flush=True)
@@ -220,7 +221,7 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                             "attempt": attempt, "timeout_seconds": cfg.page_timeout,
                             "seconds": round(time.monotonic() - started, 1), "updated": now()})
                         if queue is not None:
-                            queue.finish(engine, pair['book'], page, owner, success=False,
+                            queue.finish(engine, queue_key, page, owner, success=False,
                                          seconds=time.monotonic() - started)
 
                     try:
@@ -247,7 +248,7 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                         append_record(ocr_worker.result_file(raw, pair["book"], name,
                                       owner if queue is not None else 0), record)
                         if queue is not None:
-                            queue.finish(engine, pair['book'], page, owner, success=True,
+                            queue.finish(engine, queue_key, page, owner, success=True,
                                          seconds=time.monotonic() - started)
                         done[page] = record
                         completed += 1
@@ -256,7 +257,7 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                               f"xong sau {record['sec']}s.", flush=True)
                     except Exception as exc:
                         if queue is not None:
-                            queue.finish(engine, pair['book'], page, owner, success=False,
+                            queue.finish(engine, queue_key, page, owner, success=False,
                                          seconds=time.monotonic() - started)
                         append_record(errors, {"page": page, "error": type(exc).__name__,
                             "message": str(exc), "traceback": traceback.format_exc(), "attempt": attempt,

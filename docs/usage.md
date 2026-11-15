@@ -211,7 +211,7 @@ nhau trên cùng source thì báo xung đột thay vì chọn ngầm một bản
 
 Trong Notebook 3, bật `ENABLE_MULTI_VARIANT_OCR`, trỏ `PREPARED_IMAGES` tới
 `_dataset/dataset.json` hoặc immutable snapshot, đặt `PREPARED_MISSING_FALLBACK=False`
-và chọn `OCR_VARIANTS` chỉ gồm ảnh đã sinh. Chọn cùng `PREPARED_CROP_TYPE` cho mọi
+và chọn `OCR_VARIANTS` chỉ gồm ảnh đã sinh, hoặc `'all'` để lấy theo manifest. Chọn cùng `PREPARED_CROP_TYPES` cho mọi
 engine. Bật `ENABLE_RESTORATION_ABLATION` để xem Utility A và
 `ENABLE_VISUAL_FIDELITY` nếu cần chẩn đoán pixel; stability B tách sáu cơ chế,
 từng engine, và canonical region. `summary.exact_agreement_rate` tổng là `null`
@@ -546,6 +546,23 @@ Trong notebook 1, điền ba đường dẫn Dataset Kaggle và giữ
 Notebook chỉ đọc tài sản đã gắn, không có chế độ tải asset. `RUN_SELF_TESTS`, `VALIDATE_OUTPUT` và
 `EXPORT_PREVIEWS` hỗ trợ kiểm tra trước khi chuyển dataset.
 
+Output notebook 1 có các thư mục riêng `original/`, `clahe/`, `bicubic_x4/`,
+`unihir_restoration/` và các phương pháp khác có ảnh thành công. Mặc định bật
+`EXPORT_IMAGE_FOLDERS=True` và `EXPORT_COMPARISONS=True`. Thư mục `comparisons/`
+chứa một ảnh ghép PNG cho mỗi sách/trang/crop đã chọn, gồm original ở ô đầu và
+mọi phương pháp trong manifest; ô chưa có ảnh giữ nhãn thiếu output. Page, group
+và column dùng cùng quy tắc tên như các ảnh riêng, ví dụ `1-p00001-group001.png`.
+Các panel ghi tên phương pháp và kích thước gốc. Text mask được ghi rõ là ảnh
+chẩn đoán. `COMPARISON_COLUMNS=4`, `COMPARISON_PANEL_WIDTH=384`,
+`COMPARISON_PANEL_HEIGHT=512` chỉnh bố cục preview; PNG riêng giữ nguyên pixel.
+Ảnh ghép không được dùng làm đầu vào OCR.
+
+So sánh đầy đủ thay preview giới hạn ba mẫu; `EXPORT_PREVIEWS=False` là mặc định
+mới. Bật `EXPORT_DATASET_ZIP=True` để gói các thư mục phương pháp cùng
+`comparisons/` trong một ZIP chỉ ảnh. Giữ toàn bộ `_dataset/` riêng cho notebook 3.
+Để xuất lại từ dataset hiện có, đặt `RUN_PREPARATION=False` và chạy ô xuất cuối;
+không cần load model. Ảnh ghép không đổi được dùng lại khi xuất lại.
+
 Mặc định có `CROP_TYPES=['page','group','column']`, `RESUME=True`,
 `ALLOW_PARTIAL=False`, nguồn/đầu ra tối đa 100 triệu pixel, storage 15 GiB,
 timeout vùng 600 giây, load model 900 giây, batch 1. Thiếu asset hoặc lỗi không
@@ -641,7 +658,7 @@ Muốn dùng ảnh chuẩn bị sẵn, thay các trường sau bằng dataset th
 ```python
 PREPARED_IMAGES = "/kaggle/input/YOUR_IMAGES"
 PREPARED_VARIANT = "original"
-PREPARED_CROP_TYPE = "group"  # page | group | column | native
+PREPARED_CROP_TYPES = ["page", "group", "column"]  # kết quả tách riêng từng loại
 PREPARED_MISSING_FALLBACK = False
 ```
 
@@ -870,7 +887,7 @@ runtime metadata; chưa upload hoặc dựng lại ZIP models/packages lớn.
 Notebook 1 và 3 độc lập phiên. Sau khi QC, tải toàn bộ cây dataset hoặc ZIP đã
 kiểm tra rồi tự upload thành Kaggle Dataset; gắn vào Notebook 3 ở một phiên mới.
 Đặt `PREPARED_IMAGES` tới `dataset.json` hoặc immutable snapshot dưới Input,
-`PREPARED_MISSING_FALLBACK=False` và chọn cùng `PREPARED_CROP_TYPE`.
+`PREPARED_MISSING_FALLBACK=False` và chọn cùng danh sách `PREPARED_CROP_TYPES`.
 PDF gốc vẫn cần trong `DATA_DIR` để lập tác vụ và xác minh SHA-256.
 
 Trong Notebook 1, `VARIANT_MODE='selected'` giữ danh sách `VARIANTS` (mặc định
@@ -909,7 +926,7 @@ Ví dụ cấu hình sau khi đã có dataset và muốn tạo raw OCR cho các 
 
 ```python
 PREPARED_IMAGES = '/kaggle/input/YOUR_IMAGES/image_dataset'
-PREPARED_CROP_TYPE = 'column'
+PREPARED_CROP_TYPES = ['column']  # hoặc ['page','group','column'] để chạy cả ba
 PREPARED_MISSING_FALLBACK = False
 ENABLE_MULTI_VARIANT_OCR = True
 OCR_VARIANTS = ['original', 'clahe', 'bicubic_x4', 'realesrgan_x4']
@@ -1182,3 +1199,48 @@ nguyên pixel, file có thể lớn hơn; tăng lên 6 nếu cần tiết kiệm
 `original` trỏ thẳng object canonical, giữ nguyên dữ liệu nguồn.
 
 Chi tiết điều phối và log: [Bốn GPU L4](multi_gpu_l4.md).
+
+### Chạy mới notebook 3 từ output notebook 1
+
+Chạy notebook 1 trước, rồi gắn toàn bộ `_dataset` của notebook 1 vào Input của
+notebook 3 cùng packages, models và PDF gốc. Notebook 3 bắt đầu OCR mới trong
+phiên Kaggle mới. Cell đầu để trống bốn đường dẫn cần điền:
+
+```python
+PACKAGES_DIR = ''
+MODELS_DIR = ''
+DATA_DIR = ''
+PREPARED_IMAGES = ''  # _dataset/dataset.json từ notebook 1
+OCR_VARIANTS = 'all'
+PREPARED_CROP_TYPES = ['page','group','column']
+ALLOW_GENERATED_VARIANTS = True
+RUN_OCR = True
+BOOKS = []; MAX_BOOKS = None; PAGES = ''; LIMIT = None
+```
+
+Working và Output được tạo tự động trong `/kaggle/working`. Luồng cấu hình này
+không nhập kết quả từ phiên OCR trước. Checkpoint được tạo sau mỗi trang của
+lượt hiện tại để chạy tiếp nếu lượt này bị gián đoạn.
+
+`all` lấy danh sách phương pháp từ manifest của notebook 1, bỏ
+`tadisr_text_mask` vì đó là ảnh chẩn đoán. Phương pháp không áp dụng hoặc thất bại
+giữ trạng thái thiếu tương ứng. UniHIR/DiffTSR cần cờ cho phép trên; không đổi
+provenance hoặc coi ảnh sinh là nguồn gốc. Vẫn có thể dùng một list tên phương
+pháp khi muốn giới hạn. Multi-variant, spatial coverage, restoration ablation,
+visual fidelity và xuất báo cáo đã bật mặc định.
+
+Ba loại crop là ba thí nghiệm độc lập. Cùng một trang được OCR ở dạng page,
+group và column; không ghép ba bản chép thành một văn bản. Một worker giữ model
+qua các crop/biến thể, hàng đợi GPU dùng thư mục run để phân biệt mọi tác vụ.
+Manifest tổng là `WORK_DIR/multi_crop_manifest.json`; checkpoint nằm trong
+`crop_runs/<crop>/`, HTML/ZIP xuất tại `OUTPUT_DIR/<crop>/`. Preview chọn bằng
+`REVIEW_CROP_TYPE`.
+
+Với `OCR_VARIANTS='all'`, notebook 3 xếp `original` trước các biến thể trong
+từng loại crop và dùng original làm mốc đối chiếu. Lịch GPU động có thể xen kẽ
+các lượt: worker chuyển sang biến thể khi hết trang gốc chưa được nhận, trong
+khi worker khác có thể vẫn đang xử lý một trang gốc.
+
+Hàng đợi điều phối toàn bộ đầu vào mới từ notebook 1 cho bốn GPU. Manifest
+restoration và danh tính đầu vào dùng chung giữa các model trong một lần lập
+kế hoạch để giảm kiểm tra và đọc lặp.

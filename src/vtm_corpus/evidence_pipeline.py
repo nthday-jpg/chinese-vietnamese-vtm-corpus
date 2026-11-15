@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import OCRConfig
 from .corpus_ocr import prepare_multi_corpus, write_json
 from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path, dataset_hash
-from .prepared_variants import OCR_IMAGE_VARIANTS, variant_region_entry
+from .prepared_variants import OCR_IMAGE_VARIANTS, variant_region_entry, select_prepared_ocr_variants, cache_prepared_index
 from .multi_compare import compare_multi_corpus
 from .ocr_records import load_run, read_checkpoint_campaign
 from .pdf_images import acquire_pdf_image
@@ -18,7 +18,35 @@ from .restoration_evaluation import evaluate_restoration_page, restoration_evalu
 from .restoration_registry import SURVEY_SOURCE_GROUPS
 
 
-def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, cache_renders=True):
+@cache_prepared_index
+def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, cache_renders=True,
+                           crop_types=None, resume_manifest=None, input_plan=None):
+    if input_plan is None:input_plan={}
+    first=next(iter(models.values()))
+    variants=select_prepared_ocr_variants(first.image_dataset,variants,allow_generated=first.allow_generated_variants)
+    if crop_types is not None:
+        if (not isinstance(crop_types,list) or not crop_types or len(set(crop_types))!=len(crop_types)
+                or set(crop_types)-{'page','group','column','native'}):
+            raise ValueError('PREPARED_CROP_TYPES requires distinct page/group/column/native values')
+        if len(crop_types)>1:
+            root=Path(first.workdir).resolve()
+            combined=dict(schema='vtm-multi-crop-campaign-v1',models=list(models),variants=variants,
+                crop_types=crop_types,crop_manifests={},pairs=[],total_pages=0,total_books=0,
+                cache_renders=cache_renders,render_cache=str(root/'render_cache'))
+            for kind in crop_types:
+                configs={e:OCRConfig(**{**c.to_dict(),'image_crop_type':kind,'workdir':str(root/'crop_runs'/kind)})
+                         for e,c in models.items()}
+                manifest=prepare_variant_corpus(configs,variants,profile_dir=profile_dir,max_books=max_books,
+                    cache_renders=cache_renders,resume_manifest=resume_manifest,input_plan=input_plan)
+                campaign=json.loads(manifest.read_text(encoding='utf8'))
+                combined['crop_manifests'][kind]=str(manifest)
+                combined['pairs'].extend({**p,'crop_type':kind} for p in campaign['pairs'])
+                combined['total_pages']+=campaign['total_pages']
+                combined['total_books']=max(combined['total_books'],campaign['total_books'])
+            path=root/'multi_crop_manifest.json';write_json(path,combined)
+            print('Prepared OCR:',len(variants),'methods ×',crop_types,'×',len(models),'models',flush=True)
+            return path
+        models={e:OCRConfig(**{**c.to_dict(),'image_crop_type':crop_types[0]}) for e,c in models.items()}
     if (not isinstance(variants, list) or not variants or len(set(variants)) != len(variants)
             or set(variants)-OCR_IMAGE_VARIANTS.keys() or 'original' not in variants):
         raise ValueError('OCR_VARIANTS requires original and unique supported OCR images; masks are excluded')
@@ -33,7 +61,7 @@ def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, c
         configs = {engine: OCRConfig(**{**cfg.to_dict(), 'image_variant': variant,
             'workdir': str(root if variant == 'original' else root/'variant_runs'/variant)}) for engine, cfg in models.items()}
         manifest = prepare_multi_corpus(configs, profile_dir=profile_dir, max_books=max_books,
-            cache_renders=cache_renders, allow_unavailable_variants=True)
+            cache_renders=cache_renders, allow_unavailable_variants=True,resume_manifest=resume_manifest,input_plan=input_plan)
         campaign = json.loads(manifest.read_text(encoding='utf8'))
         combined['variant_manifests'][variant] = str(manifest)
         combined['pairs'].extend({**pair, 'variant': variant} for pair in campaign['pairs'])
@@ -177,6 +205,18 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
                              evidence_dir=None, book_groups=None, **comparison_options):
     manifest_path = Path(manifest_path)
     campaign = read_checkpoint_campaign(manifest_path)
+    if campaign.get('crop_manifests'):
+        children={kind:compare_evidence_corpus(path,enable_multi_variant=enable_multi_variant,
+            enable_spatial=enable_spatial,spatial_options=spatial_options,stability_options=stability_options,
+            enable_restoration_ablation=enable_restoration_ablation,enable_visual_fidelity=enable_visual_fidelity,
+            restoration_options=restoration_options,prepared_dataset=prepared_dataset,
+            evidence_dir=(Path(evidence_dir) if evidence_dir else manifest_path.parent/'evidence')/kind,
+            book_groups=book_groups,**comparison_options) for kind,path in campaign['crop_manifests'].items()}
+        return {'schema':'vtm-multi-crop-results-v1','models':campaign['models'],'crop_results':children,
+            'crop_types':list(children),'selected_variants':campaign['variants'],
+            'rows':[{**row,'crop_type':kind} for kind,res in children.items() for row in res['rows']],
+            'warnings':[kind+': '+w for kind,res in children.items() for w in res['warnings']],
+            'corpus_manifest':str(manifest_path.resolve()),'settings':{'crop_types':list(children)}}
     p = stability_settings(stability_options)
     spatial_settings(spatial_options)
     restoration_evaluation_settings(restoration_options)
