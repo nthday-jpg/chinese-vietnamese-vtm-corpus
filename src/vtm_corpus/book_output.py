@@ -185,7 +185,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
                                reading_order=result.get('settings', {}).get('reading_order', 'auto'))
         cfg = runs[model]['manifest']['config']
         error_path = Path(pair[model]) / 'ocr_raw' / book / f"{cfg.get('run_name') or model}_errors.jsonl"
-        if error_path.is_file():
+        for error_path in sorted(error_path.parent.glob(f"{cfg.get('run_name') or model}_errors*.jsonl")):
             for error in read_jsonl(error_path, allow_incomplete_tail=True):
                 errors.append({'model': model, 'book': book, **error, 'page': error['page'] + 1})
         lines = []
@@ -202,6 +202,8 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         log = campaign_path.parent / f'{model}_notebook.log'
         if log.is_file():
             book_write_text(directory, f'logs/{model}.log', log.read_text(encoding='utf-8', errors='replace'), generated)
+        for log in sorted(campaign_path.parent.glob(f'{model}_gpu*_notebook.log')):
+            book_write_text(directory, f'logs/{log.name}', log.read_text(encoding='utf-8', errors='replace'), generated)
     book_write_text(directory, 'errors.jsonl', ''.join(json.dumps(error, ensure_ascii=False) + '\n' for error in errors), generated)
     book_write_text(directory, 'style.css', BOOK_CSS, generated)
     book_write_text(directory, 'reader.js', BOOK_JS + (EVIDENCE_JS if result.get('evidence_schema') else ''), generated)

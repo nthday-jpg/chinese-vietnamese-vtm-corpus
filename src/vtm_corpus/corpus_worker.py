@@ -13,6 +13,7 @@ import time
 import traceback
 from types import SimpleNamespace
 import uuid
+from contextlib import contextmanager, nullcontext
 
 from .config import HUNYUAN_PROMPT, OCRConfig
 from . import ocr_worker
@@ -21,6 +22,7 @@ from .pipeline import export_ocr
 from .worker_paths import runtime_path
 from .image_preparation import run_prepared_page
 from .image_dataset import dataset_ocr_page, dataset_file_hash
+from .gpu_page_queue import GPUPageQueue
 
 
 def create_engine(engine: str, cfg: OCRConfig):
@@ -86,6 +88,30 @@ def corpus_book_plan(pair, engine, attempt):
                 cfg=cfg, name=name, raw=raw, errors=errors, tasks=tasks, done=done, todo=todo)
 
 
+@contextmanager
+def corpus_render_lock(path):
+    """Serialize cache misses for a page so models share a single PDF render."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as stream:
+        if stream.tell() == 0:
+            stream.write(b'0');stream.flush()
+        stream.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
 def corpus_page_image(campaign, manifest, book, task, cfg, render, temporary):
     """Share lossless renders across models; a damaged cache is rendered again."""
     from PIL import Image
@@ -103,33 +129,35 @@ def corpus_page_image(campaign, manifest, book, task, cfg, render, temporary):
         if not cache_root.is_relative_to(runtime_path(cfg.workdir).resolve()):
             raise ValueError('Render cache must stay within the campaign workdir')
         path = cache_root / source_sha / f'{cfg.dpi}_{cfg.max_side}' / f"p{task['page'] + 1:05d}.png"
-        metadata = path.with_suffix('.json')
-        try:
-            if path.is_symlink() or metadata.is_symlink():
-                raise ValueError('Cache symlink')
-            info = json.loads(metadata.read_text(encoding='utf-8'))
-            data = path.read_bytes()
-            if info['key'] != key or hashlib.sha256(data).hexdigest() != info['sha256']:
-                raise ValueError('Render cache mismatch')
-            with Image.open(io.BytesIO(data)) as loaded:
-                image = loaded.convert('RGB')
-            if list(image.size) != info['size']:
-                raise ValueError('Render cache size mismatch')
-            image.info['render'] = info.get('render', {})
-            return image, path, True
-        except (OSError, ValueError, KeyError):
-            pass
     else:
         path = temporary
-    image = render(str(runtime_path(task['src'])), task['page'], cfg.dpi, cfg.max_side)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    destination = path.with_suffix('.png.tmp')
-    image.save(destination, format='PNG', compress_level=1)
-    destination.replace(path)
-    if cached:
-        write_json(metadata, {'key': key, 'size': list(image.size), 'render': image.info.get('render', {}),
-                             'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
-    return image, path, False
+    with corpus_render_lock(path.with_suffix('.lock')) if cached else nullcontext():
+        if cached:
+            metadata = path.with_suffix('.json')
+            try:
+                if path.is_symlink() or metadata.is_symlink():
+                    raise ValueError('Cache symlink')
+                info = json.loads(metadata.read_text(encoding='utf-8'))
+                data = path.read_bytes()
+                if info['key'] != key or hashlib.sha256(data).hexdigest() != info['sha256']:
+                    raise ValueError('Render cache mismatch')
+                with Image.open(io.BytesIO(data)) as loaded:
+                    image = loaded.convert('RGB')
+                if list(image.size) != info['size']:
+                    raise ValueError('Render cache size mismatch')
+                image.info['render'] = info.get('render', {})
+                return image, path, True
+            except (OSError, ValueError, KeyError):
+                pass
+        image = render(str(runtime_path(task['src'])), task['page'], cfg.dpi, cfg.max_side)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        destination = path.with_suffix('.' + uuid.uuid4().hex + '.png.tmp')
+        image.save(destination, format='PNG', compress_level=1)
+        destination.replace(path)
+        if cached:
+            write_json(metadata, {'key': key, 'size': list(image.size), 'render': image.info.get('render', {}),
+                                 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
+        return image, path, False
 
 
 def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=None, renderer=None, attempt_id=None):
@@ -139,10 +167,15 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
     # One attempt spans supervisor restarts, but a new notebook call retries
     # missing pages even if an older attempt recorded an error or skip marker.
     attempt = attempt_id or os.environ.get("VTM_OCR_ATTEMPT") or uuid.uuid4().hex
+    queue_path = os.environ.get('VTM_OCR_PAGE_QUEUE')
+    queue = GPUPageQueue(queue_path) if queue_path else None
+    owner = os.environ.get('VTM_OCR_QUEUE_OWNER', attempt)
     plans = [corpus_book_plan(pair, engine, attempt) for pair in campaign['pairs']]
     completed = sum(len({task['page'] for task in plan['tasks']} & plan['done'].keys()) for plan in plans)
     progress_file = runtime_path(Path(manifest_path).parent) / f'{engine}_progress.json'
     def update_progress():
+        if queue is not None:
+            return  # The coordinator reads transactional counts; no shared JSON writes.
         write_json(progress_file, {'engine': engine, 'attempt': attempt, 'pages': campaign['total_pages'],
             'done': completed, 'missing': campaign['total_pages'] - completed, 'updated': now()})
     update_progress()
@@ -155,7 +188,10 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                     plan[key] for key in ('pair', 'directory', 'manifest_file', 'manifest', 'cfg', 'name',
                                           'raw', 'errors', 'tasks', 'done', 'todo'))
                 if todo and backend is None:
+                    load_started = time.monotonic()
                     backend = factory(engine, cfg)
+                    if queue is not None:
+                        queue.loaded(engine, time.monotonic() - load_started)
                     print(f"[corpus] {engine}: model đã tải; dùng chung cho toàn bộ sách đã chọn.", flush=True)
                 if todo:
                     expected_sha = manifest.get('books', {}).get(pair['book'], {}).get('sha256')
@@ -167,10 +203,13 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                     backend.preserve_input_resolution = cfg.segmentation != "none" or bool(cfg.image_dataset)
                     if engine == "hunyuan":
                         backend.rep, backend.prompt = cfg.repetition_penalty, cfg.prompt or HUNYUAN_PROMPT
-                manifest.update(status="running", updated=now())
-                write_json(manifest_file, manifest)
+                if queue is None:
+                    manifest.update(status="running", updated=now())
+                    write_json(manifest_file, manifest)
+                else:
+                    errors = errors.with_name(f'{name}_errors_{owner}.jsonl')
                 print(f"[corpus] {engine} / {pair['book']}: {len(tasks)} trang được chọn, còn {len(todo)} trang cần OCR.", flush=True)
-                for task in todo:
+                for task in (queue.pages(engine, pair['book'], owner) if queue is not None else todo):
                     page, started = task["page"], time.monotonic()
                     print(f"[corpus] {engine} / {pair['book']} / trang {page + 1}: "
                           f"bắt đầu (timeout={cfg.page_timeout}s).", flush=True)
@@ -180,6 +219,9 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                             "message": f"quá {cfg.page_timeout}s; worker phải khởi động lại",
                             "attempt": attempt, "timeout_seconds": cfg.page_timeout,
                             "seconds": round(time.monotonic() - started, 1), "updated": now()})
+                        if queue is not None:
+                            queue.finish(engine, pair['book'], page, owner, success=False,
+                                         seconds=time.monotonic() - started)
 
                     try:
                         with ocr_worker.page_deadline(cfg.page_timeout, on_timeout):
@@ -202,13 +244,20 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                                          if all(observed) else 'unobserved native tensors')
                             print(f"[image] {image.width}x{image.height} -> {len(regions)} input(s): "
                                   f"{dimensions}; processor: {processor}", flush=True)
-                        append_record(ocr_worker.result_file(raw, pair["book"], name, 0), record)
+                        append_record(ocr_worker.result_file(raw, pair["book"], name,
+                                      owner if queue is not None else 0), record)
+                        if queue is not None:
+                            queue.finish(engine, pair['book'], page, owner, success=True,
+                                         seconds=time.monotonic() - started)
                         done[page] = record
                         completed += 1
                         update_progress()
                         print(f"[corpus] {engine} / {pair['book']} / trang {page + 1}: "
                               f"xong sau {record['sec']}s.", flush=True)
                     except Exception as exc:
+                        if queue is not None:
+                            queue.finish(engine, pair['book'], page, owner, success=False,
+                                         seconds=time.monotonic() - started)
                         append_record(errors, {"page": page, "error": type(exc).__name__,
                             "message": str(exc), "traceback": traceback.format_exc(), "attempt": attempt,
                             "timeout_seconds": cfg.page_timeout,
@@ -219,10 +268,11 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                 wanted = {t["page"] for t in tasks}
                 got = len(wanted & done.keys())
                 counts = {"pages": len(tasks), "done": got, "missing": len(tasks) - got}
-                if cfg.export:
+                if cfg.export and queue is None:
                     export_ocr(directory, {pair["book"]: (tasks[0]["src"], sorted(wanted))}, name)
-                manifest.update(status="done" if got == len(tasks) else "partial", counts=counts, updated=now())
-                write_json(manifest_file, manifest)
+                if queue is None:
+                    manifest.update(status="done" if got == len(tasks) else "partial", counts=counts, updated=now())
+                    write_json(manifest_file, manifest)
                 print(f"[corpus] {engine} / {pair['book']}: xong {got}/{len(tasks)} trang.", flush=True)
     finally:
         if backend is not None:

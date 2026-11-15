@@ -988,6 +988,197 @@ trình bày như một phương pháp đã hoạt động.
 | Kiểm thử và Git | `.gitignore`; trong `tests/`: thêm `test_restoration_evaluation.py`, cập nhật `test_image_dataset.py`, `test_character_consensus.py`, `test_notebook_bootstrap.py`, cho phép theo dõi helper `test_notebook_sources.py`. |
 
 
+### Dùng lại FlashAttention để tránh biên dịch mỗi phiên
+
+**Cách dùng notebook riêng:** mở `0a_chuan_bi_flashattention.ipynb` trên Kaggle,
+bật GPU L4, Internet Off và chỉ gắn Dataset packages. `PACKAGES_DIR` đã điền
+`/kaggle/input/datasets/mduy2911/nlp-package`; sửa nếu mount khác. Để trống chỉ
+có nghĩa là tự tìm qua manifest, vẫn phải gắn Dataset packages.
+Không cần gắn Dataset models hoặc PDF. Notebook chỉ cài extension trong venv
+riêng, kiểm tra cả attention thường và varlen trên CUDA rồi xuất:
+
+```text
+/kaggle/working/flash_attention_build/flash_attention_package.zip
+```
+
+Tải đúng file **`flash_attention_package.zip`**, giữ tên và giải nén trực tiếp vào:
+
+```text
+C:\Users\mduy\source\chinese-vietnamese-vtm-corpus\kaggle_upload\packages\
+```
+
+ZIP đã có sẵn đường dẫn thư mục. Sau giải nén phải có:
+
+```text
+kaggle_upload/packages/image_restoration/flash_attention_cache/<hash>/
+    flash_attn-....whl
+    flash_wheel.json
+    build_report.json
+```
+
+Giữ nguyên tên wheel, tên `<hash>` và ba file bên trong. Không lồng thêm thư mục
+`flash_attention_package/`. Cập nhật Dataset packages trên Kaggle từ cây packages
+này và gắn phiên bản mới vào notebook 1. Notebook 1 tự tìm cache trong packages;
+không cần cấu hình `VTM_FLASH_CACHE_INPUT` cho trường hợp này.
+`REQUIRE_FLASH_CACHE=True` mặc định ở notebook 1 ngăn tự biên dịch hàng giờ nếu
+chưa có cache phù hợp; chỉ đổi thành `False` nếu chủ động muốn cho phép build.
+
+Notebook 1 nhúng bootstrap có cache wheel; không cần cập nhật Dataset packages/models
+chỉ để cập nhật mã bootstrap. Để dùng wheel đã tải về, vẫn phải cập nhật Dataset
+packages như hướng dẫn trên. Cache được kiểm tra theo Python, Torch, CUDA, C++ ABI,
+GPU architecture, hệ điều hành/libc và hash source; sau cài đặt vẫn chạy CUDA probe.
+Cache không chứng minh UniHIR load weights hoặc inference thành công.
+
+Sau build và CUDA probe thành công, bootstrap tự lưu wheel cùng `flash_wheel.json`
+vào `/kaggle/working/flash_attention_cache/`, trước bước load weights UniHIR.
+Giữ toàn bộ thư mục này và gắn lại dưới Input trong phiên sau. `/tmp` không phải
+nơi lưu bền vững qua các phiên.
+
+Nếu phiên hiện tại đã build bằng notebook cũ, đợi cell kết thúc; cập nhật và chạy
+lại hai ô định nghĩa **3. Mã upstream** và **4. Bootstrap** của notebook mới trong
+cùng kernel, rồi xuất wheel mà không chạy inference:
+
+```python
+prep_flash_runtime(RUNTIME_DIR).export_flash_cache(PACKAGES_DIR, RUNTIME_DIR)
+```
+
+Lệnh này chỉ nhận runtime đã hoàn tất, đối chiếu hash wheel và chạy CUDA probe.
+Nếu chưa build xong thì báo thiếu runtime; không tự build lại. Có thể dùng helper
+độc lập đã gắn vào Kaggle với các đối số `--export-flash-cache --packages-dir ...
+--runtime-dir /tmp/vtm_image_runtime`.
+
+Ở phiên mới, thêm vào ô cấu hình trước khi chạy chuẩn bị ảnh:
+
+```python
+import os
+os.environ['VTM_FLASH_CACHE_INPUT'] = '/kaggle/input/TEN_DATASET/flash_attention_cache'
+os.environ['VTM_FLASH_REQUIRE_CACHE'] = '1'
+```
+
+Thay đường dẫn bằng thư mục cache thực tế. Khi phù hợp, log có
+`Reusing FlashAttention wheel; compilation skipped`. Khi không phù hợp, chế độ
+`REQUIRE_CACHE=1` dừng sớm thay vì biên dịch hàng giờ. Để cho phép build khi chưa
+có cache trong notebook 1, đặt `REQUIRE_FLASH_CACHE=False` và bỏ biến môi trường
+`VTM_FLASH_REQUIRE_CACHE` nếu đã bật thủ công. Trong notebook 0a, dùng `ALLOW_BUILD=True`.
+Giữ nguyên Torch kernel và weights.
+
+Các phần khác có thể chuẩn bị trước:
+
+| Phần | Cách dùng lại | Hiện trạng |
+|---|---|---|
+| Prompt embedding TADiSR | Giữ tensor cùng hash của checkpoint/prompt để tránh nạp text encoder và sinh lại prompt | Đã có cache `RUNTIME_DIR/derived_prompts/<key>/saved_prompt_tokens_nocfg.pt` trong cùng phiên; chưa có gói packages tự nhận qua phiên mới |
+| Ảnh đã chuẩn bị | Giữ toàn bộ `_dataset/`, gồm metadata, object ảnh và receipt, rồi resume vào output ghi được | Có sẵn `RESUME=True`; cache chỉ dùng lại khi nguồn/cấu hình/mã còn phù hợp; ZIP chỉ ảnh không chứa đủ cache |
+| Môi trường Python | Giữ wheel offline và dựng overlay riêng | Đã có; không di chuyển nguyên venv từ `/tmp` sang máy/phiên khác vì có đường dẫn và phụ thuộc kernel |
+
+### UniHIR: dành GPU riêng cho VAE khi giải mã ảnh
+
+Với bốn L4, notebook 1 dùng `vae_gpu_id='auto'`: GPU logic cuối (3) dành riêng
+cho VAE; BAGEL được shard trên các GPU còn lại. Cấu hình này cần ít nhất ba GPU
+hiện diện và ít nhất 16 GiB trống trên GPU VAE trước khi load. Ảnh và processor
+giữ kích thước hiện có, không tự giảm độ phân giải hay dùng tiled VAE.
+Worker ghi `vae_model: cuda:3` trong device map để đối chiếu placement thực tế.
+
+`inference_timeout_seconds=1200` là mốc mềm riêng UniHIR. Sau mốc này chỉ tiếp tục
+khi bộ đếm forward/token hoặc giai đoạn xử lý còn tiến triển trong 300 giây gần
+nhất (`progress_stall_seconds=300`). Heartbeat đơn thuần không được tính là tiến
+triển. Luôn dừng tại `inference_hard_timeout_seconds=3600`; các phương pháp khác
+vẫn giữ giới hạn cũ. Chính sách này tránh hủy một lượt còn đang tính toán rồi phải
+làm lại; không làm model chạy nhanh hơn và không chứng minh đã hết OOM.
+`verify_vae=True` kiểm tra encode/decode tensor nhỏ 64×64 trên thiết bị VAE thật
+trước lượt lớn; RNG được khôi phục sau kiểm tra. Đây chưa phải full-model inference.
+Sau khi đổi placement, thử riêng `VARIANT_MODE='selected'`,
+`VARIANTS=['original','unihir_restoration']`, `CROP_TYPES=['page']`, `PAGES='1'`,
+`LIMIT=1` trước khi mở rộng. Giữ runtime/cache; không cần build lại wheel ở 0a.
+
+### Log khi dùng Run All & Save
+
+`/tmp/vtm_image_runtime/jobs/.../worker.log` là log tạm, không phải đường dẫn Output.
+Notebook tự xuất chẩn đoán khi xử lý model thất bại, trước khi ném lỗi dừng snapshot.
+Với `OUTPUT_DIR='/kaggle/working/image_dataset'`, tải file cố định:
+
+```text
+/kaggle/working/image_dataset_failure_diagnostics.zip
+```
+
+ZIP có `last_attempt.json`, report/manifest của lượt chạy, log worker, tiến độ và
+stack khi timeout; các ảnh/text trung gian đã hoàn thành được giữ dưới
+`worker_diagnostics/<job>/progress_region_.../intermediate_not_final/` và không
+được coi là ảnh cuối. Mỗi worker có giới hạn payload chẩn đoán 64 MiB; file bị bỏ
+qua phải được ghi rõ trong `diagnostic_manifest.json`. Không kèm weights hoặc PDF.
+Các file rời cũng ở `OUTPUT_DIR/_dataset/worker_diagnostics/`.
+Console hiện stage, số forward và token mỗi 30 giây; nếu còn lỗi thì gửi ZIP này,
+không cần tìm đường dẫn `/tmp` trong Output. Chỉ các lỗi model đã vào bước xử lý
+mới có gói này; lỗi cấu hình/self-test trước đó vẫn hiện trong console.
+
+### Chuẩn bị luôn native wheels của notebook 3 trong notebook 0a
+
+Notebook 0a tích hợp hai phần độc lập, mặc định cùng bật:
+
+```python
+PREPARE_FLASHATTENTION = True  # notebook 1: FlashAttention cp313
+PREPARE_NOTEBOOK3 = True       # notebook 3: TongGu/MMCV cp310 và source dependencies
+```
+
+Nếu đã có FlashAttention và chỉ cần phần notebook 3, đặt cờ đầu thành `False`.
+Notebook không load weights OCR/PDF, chỉ dựng runtime TongGu, build hoặc dùng lại
+wheel, kiểm tra Polygon/NumPy, dependency và `mmcv.ops.nms_rotated` trên GPU.
+Paddle đã có wheel offline riêng; phần này không cài/chạy OCR Paddle.
+Tiến độ OCR setup hiện mỗi 30 giây; log đầy đủ trong Output.
+
+Sau khi thành công, tải thêm file:
+
+```text
+/kaggle/working/ocr_native_build/ocr_native_package.zip
+```
+
+Giữ nguyên tên. Giải nén **cả `ocr_native_package.zip` và
+`flash_attention_package.zip` trực tiếp vào cùng gốc `kaggle_upload/packages/`**.
+Hai ZIP không cần lồng vào folder tên ZIP và không được trộn wheel cp310/cp313
+vào chung thư mục khác. Phần OCR có cấu trúc:
+
+```text
+packages/ocr_native_cache/<package>/<hash>/
+    <wheel>.whl
+    receipt.json
+packages/ocr_native_cache/build_report.json
+```
+
+Cập nhật Dataset packages và dùng notebook 3 đã cập nhật: installer tự tìm
+`ocr_native_cache/`, đối chiếu source, Python/NumPy/Torch/CUDA, architecture,
+toolchain, libc và checksum, rồi kiểm tra wheel tags bằng đúng Python đích.
+Đường dẫn runtime/bundle được chuẩn hóa trong identity để cache có thể chuyển
+qua mount/phiên khác. GPU probe vẫn chạy lại sau khi cài.
+`REQUIRE_OCR_NATIVE_CACHE=True` mặc định ở notebook 3 ngăn build lại nếu cache
+thiếu/khác môi trường; đổi thành `False` chỉ khi chủ động cho phép build.
+
+Nếu một phần chuẩn bị thất bại, phần còn lại vẫn được thử; ô cuối báo lỗi và giữ
+các ZIP đã thành công. Không có ZIP thành công mới cho phần chưa qua probe.
+Thời gian load weights và inference, cũng như việc tránh OOM, vẫn phải kiểm chứng
+bằng smoke nhỏ trên Kaggle; các report native không chứng minh OCR thành công.
+
 ### Runtime của notebook 0, 1 và 3
 
 Ba notebook chỉ chạy trên Kaggle với Internet Off. Gắn Dataset packages, models và PDF trước khi Run All; output nằm trong `/kaggle/working`, runtime tạm trong `/tmp`. Không có chế độ chạy local, tải asset qua Internet hoặc worker Windows/WSL trong notebook. Các công cụ chuẩn bị asset riêng không thuộc luồng chạy notebook. `RUN_OCR=False` ở notebook 3 vẫn cho phép đọc checkpoint đã gắn vào Kaggle.
+
+### Giảm thời gian chạy trên bốn GPU
+
+Notebook 1 và 3 mặc định `ADAPTIVE_GPU_SCHEDULING=True` cùng
+`EXECUTION_MODE='parallel_models'`. GPU hoàn tất phương pháp ban đầu có thể
+tải model còn việc và lấy các trang chưa được nhận từ hàng đợi chung. Worker
+giữ model trong bộ nhớ đến khi hết việc, không tải lại theo từng trang. Scheduler
+cân nhắc thời gian tải model và thời gian/trang trước khi thêm worker trợ giúp.
+`GPU_MAP` của notebook 3 là phân công ban đầu; `gpu_assignments.json` trong
+`WORK_DIR` ghi các lần chuyển model. Checkpoint và log tách theo worker,
+resume vẫn dùng lại trang đã xong. Chọn `False` để dùng phân công model cố định.
+
+Notebook 1 cho phần CPU chạy đồng thời phần GPU; các model vừa một GPU có thể
+chia trang cho nhiều card. UniHIR mặc định dùng `UNIHIR_GPU_IDS=[0,1,3]`
+(BAGEL 0/1, VAE 3); GPU 2 chạy phương pháp nhỏ đồng thời. Khi UniHIR xong,
+GPU 0/1/3 quay lại nhận việc. TADiSR giữ reservation bốn GPU.
+`RUN_SELF_TESTS=False`, `VALIDATE_OUTPUT=False`
+và UniHIR `verify_vae=False` bỏ các kiểm tra lặp lại mặc định; QC/kiểm manifest
+trước publish vẫn chạy. `PNG_COMPRESSION_LEVEL=1` giảm công nén PNG mà giữ
+nguyên pixel, file có thể lớn hơn; tăng lên 6 nếu cần tiết kiệm dung lượng.
+`original` trỏ thẳng object canonical, giữ nguyên dữ liệu nguồn.
+
+Chi tiết điều phối và log: [Bốn GPU L4](multi_gpu_l4.md).

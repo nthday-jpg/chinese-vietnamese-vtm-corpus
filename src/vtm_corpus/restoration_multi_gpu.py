@@ -44,6 +44,22 @@ def verify_restoration_device_map(mapping, count, *, require_multiple=True):
     return mapping
 
 
+def unihir_weight_limits(torch, options):
+    """Reserve a whole visible GPU for the full-resolution VAE encode/decode."""
+    limits=restoration_memory_limits(torch,options)
+    vae=options.get('vae_gpu_id')
+    if vae is None:return limits,None
+    if vae=='auto':vae=torch.cuda.device_count()-1
+    if isinstance(vae,bool) or not isinstance(vae,int) or vae not in limits:
+        raise ValueError('UniHIR vae_gpu_id must be auto or a visible logical GPU index')
+    if len(limits)<3:
+        raise MemoryError('Dedicated UniHIR VAE requires >=3 visible GPUs so BAGEL remains sharded across >=2 GPUs')
+    if torch.cuda.mem_get_info(vae)[0]<16*1024**3:
+        raise MemoryError(f'UniHIR VAE GPU {vae} needs >=16 GiB free before loading; no automatic resize')
+    del limits[vae]
+    return limits,vae
+
+
 def restoration_gpu_probe(torch, model, options):
     """Validate every visible GPU; aggregate capacity is only a placement precheck."""
     if not torch.cuda.is_available():
@@ -59,7 +75,7 @@ def restoration_gpu_probe(torch, model, options):
     if sharded and len(devices) < 2:
         raise RuntimeError(f'{model}: sharded placement requires >=2 visible GPUs')
     if model in ('unihir_restoration', 'tadisr_x4') and sharded:
-        limits = restoration_memory_limits(torch, options)
+        limits = unihir_weight_limits(torch,options)[0] if model=='unihir_restoration' else restoration_memory_limits(torch, options)
         minimum = 32 if model == 'unihir_restoration' else 28
         if sum(limits.values()) < minimum * 1024**3:
             raise MemoryError(f'{model}: insufficient aggregate weight budgets; inference workspace is reserved separately')
@@ -69,9 +85,57 @@ def restoration_gpu_probe(torch, model, options):
         raise RuntimeError('Single-GPU float32 TADiSR needs >=24 GiB; use placement=sharded on L4')
     if model == 'unihir_restoration' and any(d['capability'][0] < 8 for d in devices):
         raise RuntimeError('UniHIR BF16/FlashAttention requires Ampere-or-newer GPUs')
-    return dict(devices=devices, placement=options.get('placement', 'single'),
+    report=dict(devices=devices, placement=options.get('placement', 'single'),
         cuda_visible_devices=__import__('os').environ.get('CUDA_VISIBLE_DEVICES'),
         weight_capacity_check_only=True)
+    if model=='unihir_restoration' and sharded:
+        weight_limits,vae_gpu=unihir_weight_limits(torch,options)
+        report.update(weight_gpu_ids=sorted(weight_limits),vae_gpu_id=vae_gpu)
+    return report
+
+
+def cpu_staged_checkpoint_dispatch(dispatch, model, **kwargs):
+    """Stage checkpoint tensors on CPU before Accelerate casts/places them.
+
+    The pinned Accelerate safetensors loader otherwise holds the checkpoint's
+    original dtype on GPU alongside the converted model. Clone function globals
+    for this call only; neither Accelerate nor the upstream module is patched.
+    Final model placement still follows the validated GPU-only device map.
+    """
+    import types
+
+    def clone(function, replacements):
+        result = types.FunctionType(function.__code__,
+            {**function.__globals__, **replacements}, function.__name__,
+            function.__defaults__, function.__closure__)
+        result.__kwdefaults__ = function.__kwdefaults__
+        return result
+
+    load = dispatch.__globals__['load_checkpoint_in_model']
+    read = load.__globals__['load_state_dict']
+
+    def cpu_read(checkpoint_file, device_map=None):
+        return read(checkpoint_file, device_map=None)
+
+    staged_load = clone(load, {'load_state_dict': cpu_read})
+    return clone(dispatch, {'load_checkpoint_in_model': staged_load})(model, **kwargs)
+
+
+def verify_unihir_vae(vae):
+    """Check the real codec on a tiny tensor, restoring all touched RNG states."""
+    import time
+    import torch
+    parameter=next(vae.parameters());device=parameter.device
+    devices=[device.index] if device.type=='cuda' else []
+    started=time.monotonic()
+    with torch.random.fork_rng(devices=devices),torch.inference_mode():
+        image=torch.zeros((1,3,64,64),device=device,dtype=parameter.dtype)
+        latent=vae.encode(image);decoded=vae.decode(latent)
+        if decoded.shape!=image.shape:raise ValueError('UniHIR VAE roundtrip dimensions differ')
+        if not torch.isfinite(latent).all().item() or not torch.isfinite(decoded).all().item():
+            raise ValueError('UniHIR VAE produced non-finite values in codec precheck')
+    return dict(device=str(device),dtype=str(parameter.dtype),input_size=[64,64],
+                seconds=round(time.monotonic()-started,3),status='passed',scope='codec_only; not full model inference')
 
 
 def load_unihir_multi_gpu(assets, options):
@@ -79,18 +143,25 @@ def load_unihir_multi_gpu(assets, options):
     import types
     import utils as upstream
     from accelerate import infer_auto_device_map, load_checkpoint_and_dispatch
-    limits = restoration_memory_limits(torch, options)
+    limits,vae_gpu=unihir_weight_limits(torch,options)
+
+    def validate(mapping):
+        verify_restoration_device_map(mapping,torch.cuda.device_count())
+        for device in mapping.values():
+            index=device if isinstance(device,int) else int(str(device).split(':')[1])
+            if index not in limits:raise MemoryError('UniHIR weight map uses the GPU reserved for VAE')
+        return mapping
 
     def infer(model, **kwargs):
         # The upstream estimate otherwise assumes float32 although loading is BF16.
         kwargs.update(max_memory=limits, dtype=torch.bfloat16,
                       no_split_module_classes=['Qwen2MoTDecoderLayer'])
-        return verify_restoration_device_map(infer_auto_device_map(model, **kwargs), len(limits))
+        return validate(infer_auto_device_map(model, **kwargs))
 
     def dispatch(model, **kwargs):
         # Upstream co-locates its embedding/connector modules after inference.
-        verify_restoration_device_map(kwargs['device_map'], len(limits))
-        return load_checkpoint_and_dispatch(model, **kwargs)
+        validate(kwargs['device_map'])
+        return cpu_staged_checkpoint_dispatch(load_checkpoint_and_dispatch, model, **kwargs)
 
     # Bind two placement functions without changing the pinned upstream files/globals.
     loader = types.FunctionType(upstream.load_model.__code__, {
@@ -98,6 +169,10 @@ def load_unihir_multi_gpu(assets, options):
         'load_checkpoint_and_dispatch': dispatch}, argdefs=upstream.load_model.__defaults__)
     result = loader(assets['base_model'], max_mem_per_gpu=options.get('max_memory', '18GiB'))
     result[0]._vtm_device_map = {k: str(v) for k, v in result[0].hf_device_map.items()}
+    if vae_gpu is not None:
+        result[2].to(f'cuda:{vae_gpu}')
+        result[0]._vtm_device_map['vae_model']=f'cuda:{vae_gpu}'
+    if options.get('verify_vae',False):result[0]._vtm_vae_smoke=verify_unihir_vae(result[2])
     return result
 
 

@@ -12,16 +12,18 @@ import subprocess
 import sys
 import time
 import uuid
-from threading import Lock
+from threading import Lock, Event
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm.auto import tqdm
 
 from .config import OCRConfig, load_ocr_config
 from .ocr_worker import load_results
-from .pipeline import _run_dir, list_pdfs, parse_pages, select_entries
+from .pipeline import _run_dir, list_pdfs, parse_pages, select_entries, export_ocr
 from .worker_paths import to_wsl_path
 from .image_dataset import bind_image_dataset
-from .gpu_execution import gpu_worker_environment, validate_ocr_gpu_map, run_gpu_task_waves
+from .gpu_execution import gpu_worker_environment, validate_ocr_gpu_map, run_gpu_task_waves, choose_gpu_job
+from .gpu_page_queue import GPUPageQueue
 
 
 def now() -> str:
@@ -30,7 +32,7 @@ def now() -> str:
 
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
+    temporary = path.with_suffix('.' + uuid.uuid4().hex + '.tmp')
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
 
@@ -267,7 +269,8 @@ def corpus_worker_command(first: dict, manifest_path: Path, engine: str, token: 
             "--manifest", str(manifest_path), "--engine", engine], None
 
 
-def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cancel_event=None) -> dict:
+def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cancel_event=None,
+                      page_queue=None, queue_owner=None, attempt_id=None) -> dict:
     """Blocking notebook call. The child process owns and releases the GPU model."""
     if engine not in {"hunyuan", "paddle", "ppocr", "tonggu"}:
         raise ValueError("engine phải là hunyuan, paddle, ppocr hoặc tonggu")
@@ -276,14 +279,22 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
     first = json.loads((Path(campaign["pairs"][0][engine]) / "run_manifest.json").read_text(encoding="utf-8"))["config"]
     budget = float(first.get("budget_h", 24)) * 3600
     max_restarts = int(first.get("max_restarts", 5))
-    progress = engine_progress(manifest_path, engine)
+    queue = GPUPageQueue(page_queue) if page_queue else None
+    queue_owner = queue_owner or f'g{gpu}_{uuid.uuid4().hex[:12]}'
+    def read_progress():
+        if queue is None:
+            return engine_progress(manifest_path, engine)
+        state = queue.snapshot()[engine]
+        return {k: state[k] for k in ('pages','done','missing')}
+    progress = read_progress()
     if progress["missing"] == 0:
         print(f"{engine}: đã có đủ {progress['done']:,} trang cùng cấu hình; dùng lại kết quả.")
         return progress
     lock_dir = manifest_path.parent if gpu is None else manifest_path.parent / 'gpu_locks' / str(gpu)
     with gpu_lock(lock_dir):
-        log = manifest_path.parent / f"{engine}_notebook.log"
-        state_path = manifest_path.parent / ("status.json" if gpu is None else f"{engine}_status.json")
+        label = engine if queue is None else f'{engine}_gpu{gpu}'
+        log = manifest_path.parent / f"{label}_notebook.log"
+        state_path = manifest_path.parent / ("status.json" if gpu is None else f"{label}_status.json")
         started = time.monotonic()
         environment = os.environ.copy()
         environment.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
@@ -291,7 +302,9 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
             if first.get('worker_wsl_distro'):
                 raise ValueError('Parallel GPU mapping requires native Linux workers; use sequential for WSL')
             environment = gpu_worker_environment([gpu], environment)
-        environment["VTM_OCR_ATTEMPT"] = uuid.uuid4().hex
+        environment["VTM_OCR_ATTEMPT"] = attempt_id or uuid.uuid4().hex
+        if queue is not None:
+            environment.update(VTM_OCR_PAGE_QUEUE=str(page_queue), VTM_OCR_QUEUE_OWNER=queue_owner)
         environment["PYTHONPATH"] = os.pathsep.join([
             str(Path(__file__).resolve().parents[1]), *first.get("worker_pythonpath", []),
             environment.get("PYTHONPATH", ""),
@@ -326,7 +339,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
                                 if line.startswith(("[model]", "[corpus]")):
                                     bar.write(line.rstrip())
                             offset = stream.tell()
-                        progress = engine_progress(manifest_path, engine, attempt_id=environment['VTM_OCR_ATTEMPT']) or progress
+                        progress = (read_progress() if queue is not None else engine_progress(
+                            manifest_path, engine, attempt_id=environment['VTM_OCR_ATTEMPT'])) or progress
                         bar.n = progress["done"]
                         bar.refresh()
                         write_json(state_path, {"status": "running", "active_engine": engine,
@@ -349,6 +363,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
                     write_json(state_path, {"status": "interrupted", "active_engine": None, "updated": now()})
                     raise
                 if code == 124 and restarts < max_restarts:
+                    if queue is not None:
+                        queue.abandon(queue_owner)
                     restarts += 1
                     bar.write(f"{engine}: khởi động lại sau timeout ({restarts}/{max_restarts}).")
                     continue
@@ -356,7 +372,7 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
                     tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-16:])
                     write_json(state_path, {"status": "error", "active_engine": None, "updated": now()})
                     raise RuntimeError(f"{engine} worker lỗi (exit={code}). Log: {log}\n{tail}")
-                progress = engine_progress(manifest_path, engine)
+                progress = read_progress()
                 bar.n = progress["done"]
                 bar.refresh()
                 break
@@ -366,9 +382,11 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
     return progress
 
 
-def run_corpus_engines(manifest_path, engines, gpu_map):
+def run_corpus_engines(manifest_path, engines, gpu_map, *, adaptive=False):
     """Run identical corpus selections concurrently, retaining per-engine failures."""
     gpu_map = validate_ocr_gpu_map(engines, gpu_map)
+    if adaptive:
+        return run_adaptive_corpus_engines(manifest_path, engines, gpu_map)
     errors = {}
     error_lock = Lock()
     path = Path(manifest_path)
@@ -398,4 +416,95 @@ def run_corpus_engines(manifest_path, engines, gpu_map):
         write_json(path.parent / 'status.json', dict(status='partial' if errors or any(
             result.get('missing', 0) for result in results.values()) else 'complete',
             workflow='notebook_parallel_models', gpu_map=gpu_map, updated=now()))
+    return results, errors
+
+
+def run_adaptive_corpus_engines(manifest_path, engines, gpu_map):
+    """One resident model per card; completed cards join a slower model's queue."""
+    path = Path(manifest_path).resolve()
+    campaign = json.loads(path.read_text(encoding='utf8'))
+    attempt = uuid.uuid4().hex
+    queue = GPUPageQueue(path.parent / 'page_queues' / (attempt + '.sqlite3'))
+    jobs, totals, plans = [], {}, []
+    for engine in engines:
+        cached = 0
+        for pair in campaign['pairs']:
+            directory = Path(pair[engine])
+            manifest = json.loads((directory / 'run_manifest.json').read_text(encoding='utf8'))
+            tasks = [json.loads(line) for line in (directory / 'tasks.jsonl').read_text(encoding='utf8').splitlines() if line]
+            name = manifest['config'].get('run_name') or engine
+            done = load_results(directory / 'ocr_raw', pair['book'], name)
+            cached += len({t['page'] for t in tasks} & done.keys())
+            jobs.extend((engine, pair['book'], t) for t in tasks if t['page'] not in done and
+                        t.get('prepared_input', {}).get('state', 'ok') == 'ok')
+            plans.append((engine, pair, directory, manifest, tasks, name))
+        totals[engine] = (campaign['total_pages'], cached)
+    active, errors, disabled, assignments = {}, {}, set(), []
+    lock, cancel = Lock(), Event()
+
+    def actor(gpu, preferred):
+        while not cancel.is_set():
+            with lock:
+                snapshot = queue.snapshot()
+                name = choose_gpu_job({n: s['pending'] for n,s in snapshot.items()}, active,
+                                      snapshot, preferred=preferred, failed=disabled)
+                if name is None:
+                    return
+                owner = f'g{gpu}_{uuid.uuid4().hex[:12]}'
+                if not queue.reserve(name, owner):
+                    continue
+                active[name] = active.get(name, 0) + 1
+                assignments.append(dict(gpu=gpu, engine=name, pending=snapshot[name]['pending'], updated=now()))
+                write_json(path.parent / 'gpu_assignments.json', {'assignments': assignments})
+            print(f'[scheduler] GPU {gpu} -> {name}: {snapshot[name]["pending"]} queued pages', flush=True)
+            try:
+                run_corpus_engine(path, name, gpu=gpu, cancel_event=cancel,
+                                  page_queue=queue.path, queue_owner=owner, attempt_id=attempt)
+            except Exception as exc:
+                if cancel.is_set():
+                    raise
+                with lock:
+                    errors[name] = dict(error=type(exc).__name__, message=str(exc), gpu=gpu, updated=now())
+                    # Other resident copies can finish; do not repeatedly load a failed model.
+                    disabled.add(name)
+                    write_json(path.parent / 'stage_errors.json', errors)
+            finally:
+                queue.abandon(owner)
+                with lock:
+                    active[name] -= 1
+
+    with gpu_lock(path.parent):
+        queue.initialize(jobs, totals)
+        write_json(path.parent / 'stage_errors.json', errors)
+        write_json(path.parent / 'status.json', dict(status='running', workflow='notebook_adaptive_pages',
+                   gpu_map=gpu_map, queue=queue.path, updated=now()))
+        with ThreadPoolExecutor(max_workers=len(gpu_map)) as pool:
+            futures = [pool.submit(actor, gpu, engine) for engine,gpu in gpu_map.items()]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                cancel.set()
+                write_json(path.parent / 'status.json', dict(status='interrupted',
+                           workflow='notebook_adaptive_pages', updated=now()))
+                raise
+        # Only the coordinator updates shared manifests/exports after all writers exit.
+        for engine,pair,directory,manifest,tasks,name in plans:
+            done = load_results(directory / 'ocr_raw', pair['book'], name)
+            wanted = {t['page'] for t in tasks}
+            got = len(wanted & done.keys())
+            manifest.update(status='done' if got == len(tasks) else 'partial', updated=now(),
+                            counts=dict(pages=len(tasks), done=got, missing=len(tasks)-got))
+            write_json(directory / 'run_manifest.json', manifest)
+            if manifest['config'].get('export') and tasks:
+                export_ocr(directory, {pair['book']: (tasks[0]['src'], sorted(wanted))}, name)
+        results = {n: engine_progress(path,n) for n in engines}
+        for n,s in results.items():
+            if n in errors:
+                s['status'] = 'error'
+            write_json(path.parent / f'{n}_status.json', {**s, 'updated':now(),
+                       'status':'stage_complete' if not s['missing'] else 'partial'})
+        write_json(path.parent / 'status.json', dict(status='partial' if errors or any(
+            s['missing'] for s in results.values()) else 'complete', workflow='notebook_adaptive_pages',
+            gpu_map=gpu_map, updated=now()))
     return results, errors
