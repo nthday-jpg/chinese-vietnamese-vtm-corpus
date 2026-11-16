@@ -564,10 +564,19 @@ mới. Bật `EXPORT_DATASET_ZIP=True` để gói các thư mục phương pháp
 không cần load model. Ảnh ghép không đổi được dùng lại khi xuất lại.
 
 Mặc định có `CROP_TYPES=['page','group','column']`, `RESUME=True`,
-`ALLOW_PARTIAL=False`, nguồn/đầu ra tối đa 100 triệu pixel, storage 15 GiB,
+`ALLOW_PARTIAL=False`, nguồn/đầu ra tối đa 100 triệu pixel,
 timeout vùng 600 giây, load model 900 giây, batch 1. Thiếu asset hoặc lỗi không
 được công bố như dataset đủ; `ALLOW_PARTIAL` phải bật có chủ đích. TADiSR tile
 hai trục và kiểm phủ crop hẹp/dài; mỗi model có seed/cache/preflight riêng.
+
+`MAX_STORAGE_BYTES=None` tự lấy dung lượng trống trên ổ chứa `_dataset/`, trừ
+`STORAGE_RESERVE_BYTES=2*1024**3` cho runtime và checkpoint; có thể đặt giới hạn
+byte cụ thể. Notebook kiểm cả giới hạn lẫn chỗ trống cho file tạm mỗi lần ghi.
+Khi chạm giới hạn, `last_attempt.json` ghi `status=incomplete_storage`; cache
+hoàn tất được giữ, lượt chưa đủ không xuất như dataset hoàn chỉnh. Giữ toàn bộ
+`_dataset/`, giải phóng/thêm dung lượng rồi chạy lại cùng cấu hình và `RESUME=True`.
+Nếu toàn bộ phương pháp và ba loại crop không vừa ổ đĩa, chia lượt theo
+`BOOKS`/`PAGES` và lưu từng lượt; tăng giới hạn không làm tăng dung lượng vật lý.
 
 Kiểm tra preview đường cắt: `vertical_rtl` đọc phải → trái, trên → dưới;
 `horizontal_ltr` dùng cho bố cục ngang. `column_cuts` là tỷ lệ ngang tăng dần

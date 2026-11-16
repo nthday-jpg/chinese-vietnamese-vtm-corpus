@@ -6,10 +6,12 @@ from functools import lru_cache
 import io
 import json
 from pathlib import Path, PurePosixPath
+import shutil
 import uuid
 import zipfile
 
 from .image_dataset import dataset_hash, dataset_file_hash, dataset_json_bytes, dataset_path, dataset_write
+from .restoration_storage import PreparationStorageLimit
 
 
 COMPARISON_EXPORT_VERSION = 1
@@ -66,7 +68,8 @@ def render_comparison_sheet(filename, methods, panels, *, columns, panel_width, 
         raise
 
 
-def export_comparison_images(entries, destination, *, methods=None, columns=4, panel_width=384, panel_height=512):
+def export_comparison_images(entries, destination, *, methods=None, columns=4, panel_width=384, panel_height=512,
+                             reserve_bytes=2*1024**3):
     """One sheet per identical book/page/crop filename, with original first."""
     if any(type(v) is not int or v<=0 for v in (columns,panel_width,panel_height)):
         raise ValueError('Comparison columns/panel dimensions must be positive integers')
@@ -107,23 +110,35 @@ def export_comparison_images(entries, destination, *, methods=None, columns=4, p
             raise FileExistsError('Unmanaged or edited comparison image: '+str(target))
         plans.append((filename,panels,relative,target,identity,old,digest))
     current={};generated=reused=0;exported=[]
-    for filename,panels,relative,target,identity,old,digest in plans:
-        if digest and old.get('identity')==identity:
-            generated_digest=digest;reused+=1
-        else:
-            sheet=render_comparison_sheet(filename,ordered,panels,columns=columns,
-                                          panel_width=panel_width,panel_height=panel_height)
-            target.parent.mkdir(parents=True,exist_ok=True)
-            temporary=target.with_name('.'+target.name+'.'+uuid.uuid4().hex+'.tmp')
-            try:
-                sheet.save(temporary,format='PNG',compress_level=1)
-                temporary.replace(target)
-            finally:
-                sheet.close()
-                if temporary.exists():temporary.unlink()
-            generated_digest=dataset_file_hash(target);generated+=1
-        current[relative]={'identity':identity,'sha256':generated_digest}
-        exported.append({'name':relative,'source':str(target),'sha256':generated_digest})
+    try:
+        for filename,panels,relative,target,identity,old,digest in plans:
+            if digest and old.get('identity')==identity:
+                generated_digest=digest;reused+=1
+            else:
+                sheet=render_comparison_sheet(filename,ordered,panels,columns=columns,
+                                              panel_width=panel_width,panel_height=panel_height)
+                target.parent.mkdir(parents=True,exist_ok=True)
+                temporary=target.with_name('.'+target.name+'.'+uuid.uuid4().hex+'.tmp')
+                try:
+                    stream=io.BytesIO()
+                    sheet.save(stream,format='PNG',compress_level=1)
+                    data=stream.getvalue()
+                    if shutil.disk_usage(destination).free < len(data)+reserve_bytes:
+                        raise PreparationStorageLimit('Storage reserve reached while exporting comparisons')
+                    temporary.write_bytes(data)
+                    temporary.replace(target)
+                finally:
+                    sheet.close()
+                    if temporary.exists():temporary.unlink()
+                generated_digest=dataset_file_hash(target);generated+=1
+            current[relative]={'identity':identity,'sha256':generated_digest}
+            exported.append({'name':relative,'source':str(target),'sha256':generated_digest})
+    except PreparationStorageLimit:
+        # Retain ownership of finished previews so a later export can reuse
+        # them; leave all old sheets in place until the selection completes.
+        dataset_write(receipt_root,receipt,dataset_json_bytes(
+            {'settings':settings,'files':{**owned,**current},'incomplete_storage':True}))
+        raise
     # Retire only unchanged sheets created by this exporter on a previous selection.
     for name,record in owned.items():
         if name not in current:
@@ -139,6 +154,9 @@ def package_image_export_entries(entries, archive):
     archive=Path(archive).absolute()
     if archive.suffix.lower()!='.zip':raise ValueError('Image archive must have a .zip extension')
     archive.parent.mkdir(parents=True,exist_ok=True)
+    required=sum(Path(entry['source']).stat().st_size for entry in entries)+len(entries)*512
+    if shutil.disk_usage(archive.parent).free < required+2*1024**3:
+        raise PreparationStorageLimit('Storage reserve reached before writing the image ZIP')
     temporary=archive.with_name('.'+archive.name+'.'+uuid.uuid4().hex+'.tmp')
     try:
         names=set()

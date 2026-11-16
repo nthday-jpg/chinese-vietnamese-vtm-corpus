@@ -11,7 +11,8 @@ def restoration_failure_state(error, *, phase='inference'):
     if isinstance(error, (TimeoutError,)) or 'timeout' in message or 'timed out' in message:
         return 'timeout'
     if isinstance(error, MemoryError) or any(s in message for s in (
-            'out of memory', 'exceeds max_', 'storage budget', 'no space left', 'disk full')):
+            'out of memory', 'exceeds max_', 'max_storage_bytes', 'storage reserve',
+            'storage budget', 'no space left', 'disk full')):
         return 'resource_exceeded'
     if isinstance(error, FileNotFoundError):
         return 'missing_assets'
