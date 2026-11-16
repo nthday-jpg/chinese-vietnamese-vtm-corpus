@@ -10,7 +10,8 @@ PDF sách Hán (scan) ──► Bước 1: OCR ──► .txt chữ Hán ──�
 | `data/` | PDF sách Hán (bản scan, không lấy chữ trực tiếp được) |
 | `1_ocr_hunyuan.ipynb` | Bước 1 bằng **HunyuanOCR** (Tencent) |
 | `1_ocr_paddle.ipynb` | Bước 1 bằng **PaddleOCR-VL** (Baidu) |
-| `2_dich_han_viet.ipynb` | Bước 2: dịch bằng một LLM nhỏ tuỳ chọn |
+| `download_erax_model.ipynb` | Tải riêng EraX từ Hugging Face khi online, không cần GPU |
+| `2_dich_han_viet.ipynb` | Bước 2: dịch Dataset TXT bằng EraX trên L4 offline |
 | `PROBLEM.md` | Mô tả bài toán: input / output của từng bước |
 | `FLOW.md` | Giải thích từng bước notebook làm gì + gợi ý các cách làm khác |
 
@@ -28,11 +29,12 @@ src/vtm_corpus/          # toàn bộ logic: OCR, dịch, chia việc, report, C
   report.py              # bảng tổng hợp + hiển thị trong notebook
   cli.py                 # lệnh `vtm`
 1_ocr_*.ipynb            # notebook mỏng: cấu hình + chạy + xem kết quả
-2_dich_han_viet.ipynb
+download_erax_model.ipynb # chuẩn bị model online
+2_dich_han_viet.ipynb      # standalone: Dependency Manager + L4 offline
 pyproject.toml
 ```
 
-Notebook **không còn chứa logic**; mọi tham số nằm trong ô cấu hình của notebook và
+Notebook OCR **không còn chứa logic**; mọi tham số nằm trong ô cấu hình của notebook và
 được truyền vào package. Khi sửa logic, push repo rồi `git pull` trong notebook Kaggle.
 Mỗi run ghi `run_manifest.json` (toàn bộ cấu hình đã dùng), và thư mục
 `runs/<loại>_<tên>_<config-hash>/` nên không bị lẫn kết quả giữa các cấu hình khác nhau.
@@ -126,19 +128,26 @@ phương pháp tốt hơn và kiểm tra chất lượng trên từng sách.
 - Chạy thử nhanh: đặt `pages="1-10"`, `limit=10`, `n_layout=0` trong ô `OCRConfig`.
 - Tốc độ khoảng 10–20 giây/trang/GPU.
 
-## Bước 2 — Dịch
-- *Add Input* → *Notebooks* → chọn notebook bước 1 (lấy Output của nó), hoặc một dataset chứa các file `.txt`.
-- Sửa ô `TranslateConfig` rồi chạy như trên. Kết quả nằm ở `runs/dich_*/dich/<tên sách>.txt`.
-- `model`: model chat/instruct bất kỳ trên Hugging Face, miễn vừa VRAM. Ví dụ:
+## Bước 2 — Dịch EraX trên L4 offline
+1. Chạy `download_erax_model.ipynb` online/CPU, thêm Kaggle Secret `HF_TOKEN`
+   nếu cần. Save Version để lưu model thành Output riêng.
+2. Mở `2_dich_han_viet.ipynb` online/CPU. Copy các lệnh pip trong
+   markdown đầu notebook vào **Add-ons → Install Dependencies**, Run rồi Commit.
+   Kaggle tạo Dependency Installation Notebook và tự attach cho notebook này.
+3. Add Input model ở bước 1 và Dataset/Output OCR chứa TXT chữ Hán.
+4. Chuyển cùng notebook sang **Internet Off + GPU L4**, chạy session mới.
+   Kaggle cài dependencies trước code chính; không tự pip install trong cell.
+5. Sửa `INPUT_DIR`, tùy chọn `MODEL_DIR`, `BOOKS`, `BATCH`, `LIMIT`.
+   `LIMIT=20` để thử; `None` dịch toàn bộ. BF16 + FlashAttention 2, không dùng FP16.
 
-| Model | `gpu_per_model` | `load_4bit` |
-|---|---|---|
-| `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen3-4B` | 1 (2 bản chạy song song) | False |
-| `Qwen/Qwen2.5-7B-Instruct` (mặc định), `Qwen/Qwen3-8B`, `SeaLLMs/SeaLLMs-v3-7B-Chat`, `sail/Sailor2-8B-Chat` | 2 | False |
-| `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen3-14B` | 2 | True |
+Notebook dịch standalone, không cần clone repo. Có smoke test CUDA extension,
+logits và bản dịch trước khi chạy Dataset. Output UTF-8 nằm ở
+`runs/dich_erax_l4_<hash>/dich/<tên sách>.txt`; raw JSONL nằm trong `dich_raw/`.
+Đặt `RESUME_FROM` để đọc Output phiên trước. Progress dịch Dataset bắt đầu
+sau khi đã load model và smoke test. Không cần notebook tạo wheel riêng.
 
-  Model cần đăng nhập (Llama, Gemma…): *Add-ons → Secrets*, thêm `HF_TOKEN`.
-- Chạy thử nhanh: đặt `limit=20` trong `TranslateConfig`.
+FlashAttention phải khớp Torch/CUDA; cài thử trên CPU không thay thế kiểm tra
+kernel thật trên L4. Các lệnh chuẩn bị và inference chưa được benchmark trên L4.
 
 ## Hết 12 giờ mà chưa xong
 Cả 3 notebook đều lưu kết quả sau từng trang hoặc từng đoạn. Khi bị dừng: *Add Input* → *Notebooks* → chọn chính notebook đó (lấy Output phiên vừa chạy), đặt `resume_from=["/kaggle/input/<output>"]` →
