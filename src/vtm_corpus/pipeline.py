@@ -408,9 +408,12 @@ def _run_layout(cfg: OCRConfig, run_dir: Path, raw_dir: Path, books: dict,
         layout_name = f"{name}_layout"
         extra = ["--prompt", cfg.layout_prompt, "--max-new", "3000"]
     n = max(1, min(n_gpu, len(demo)))
+    gpus = max(1, _detect_gpus())
     jobs = []
     for k in range(n):
-        cmd, env = _ocr_cmd(cfg, raw_dir, demo_path, k, n, layout_name, extra, k)
+        # gpu = k % số GPU: cho phép nhiều worker/GPU (vd n_gpu=8 trên 4 GPU) khi
+        # model nhỏ mà VRAM đủ -> tăng util GPU và throughput.
+        cmd, env = _ocr_cmd(cfg, raw_dir, demo_path, k, n, layout_name, extra, k % gpus)
         jobs.append({"cmd": cmd, "env": env, "log": raw_dir / f"_{layout_name}_{k}.log",
                      "label": layout_name})
     _supervise(jobs, min(cfg.budget_h, cfg.layout_budget_h), cfg.stall_min, cfg.max_restarts)
@@ -513,8 +516,10 @@ def run_ocr(cfg: OCRConfig, *, books: dict | None = None, tasks: list[dict] | No
         print(f"Layout: {len(layout_paths)} ảnh -> {run_dir / 'layout'}", flush=True)
 
     jobs = []
+    gpus = max(1, _detect_gpus())
     for k in range(n_gpu):
-        cmd, env = _ocr_cmd(cfg, raw_dir, tasks_path, k, n_gpu, name, [], k)
+        # gpu = k % số GPU: nhiều worker/GPU (n_gpu > số GPU) khi VRAM đủ.
+        cmd, env = _ocr_cmd(cfg, raw_dir, tasks_path, k, n_gpu, name, [], k % gpus)
         jobs.append({"cmd": cmd, "env": env, "log": raw_dir / f"_{name}_{k}.log", "label": name})
     wanted_pages = {(t["book"], t["page"]) for t in tasks}
 

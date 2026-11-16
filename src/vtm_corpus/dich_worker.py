@@ -34,7 +34,7 @@ def build_prompt(tok, system: str, user: str) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct", help="bỏ qua khi --engine dummy")
+    ap.add_argument("--model", default="erax-ai/EraX-Translator-V1.0", help="bỏ qua khi --engine dummy")
     ap.add_argument("--engine", default="hf", choices=["hf", "dummy"],
                     help="hf = transformers; dummy = không tải model, chỉ test pipeline")
     ap.add_argument("--chunks", required=True, help='jsonl, mỗi dòng {"id", "zh"}')
@@ -42,8 +42,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--nshard", type=int, default=1)
-    ap.add_argument("--batch", type=int, default=8)
-    ap.add_argument("--max-new", type=int, default=1200)
+    ap.add_argument("--batch", type=int, default=2)
+    ap.add_argument("--max-new", type=int, default=1024)
     ap.add_argument("--temperature", type=float, default=0.0, help="0 = luôn chọn từ chắc nhất")
     ap.add_argument("--rep-penalty", type=float, default=1.05)
     ap.add_argument("--load-4bit", action="store_true")
@@ -65,18 +65,23 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import Gemma3ForConditionalGeneration, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.model)
     tok.padding_side = "left"
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     use_cuda = a.device != "cpu" and torch.cuda.is_available()
-    kw = {"dtype": torch.float16, "device_map": "auto"} if use_cuda else {"dtype": torch.float32}
+    # T4 không hỗ trợ BF16/FlashAttention 2. Đặt toàn bộ model trên GPU
+    # của worker: thiếu VRAM thì báo lỗi, không âm thầm offload sang CPU.
+    kw = {"dtype": torch.float16, "device_map": {"": 0}} if use_cuda else {"dtype": torch.float32}
+    kw["attn_implementation"] = "sdpa"
     if use_cuda and a.load_4bit:
         from transformers import BitsAndBytesConfig
         kw["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
                                                        bnb_4bit_compute_dtype=torch.float16)
-    model = AutoModelForCausalLM.from_pretrained(a.model, **kw).eval()
+    model = Gemma3ForConditionalGeneration.from_pretrained(a.model, **kw).eval()
+    print(f"[dich#{a.shard}] model={a.model} device={model.device} "
+          f"dtype={model.dtype} batch={a.batch}", flush=True)
     pr = json.loads(Path(a.prompt).read_text(encoding="utf-8"))
 
     todo.sort(key=lambda c: len(c["zh"]), reverse=True)  # đoạn dài gần nhau -> ít padding

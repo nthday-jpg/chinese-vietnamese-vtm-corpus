@@ -15,11 +15,9 @@ HUNYUAN_PROMPT = ("提取文档图片中正文的所有信息用markdown格式�
                   "表格用html格式表达，文档中公式用latex格式表示，按照阅读顺序组织进行解析。")
 LAYOUT_PROMPT = "按照阅读顺序解析图中的版式信息。"
 SYSTEM_PROMPT = ("Bạn là dịch giả chuyên dịch sách Y học cổ truyền từ chữ Hán (văn ngôn và bạch thoại) "
-                 "sang tiếng Việt.")
-USER_PROMPT = ("Văn bản chữ Hán:\n{text}\n\n"
-               "Dịch toàn bộ văn bản trên sang tiếng Việt, đầy đủ ý, văn phong tự nhiên. Tên huyệt, vị thuốc, "
-               "bài thuốc, bệnh danh giữ theo âm Hán-Việt (vd: 足三里 -> Túc tam lý). Chỉ viết tiếng Việt: "
-               "không chép lại chữ Hán, không dịch sang tiếng Anh, không lời dẫn, không giải thích.")
+                 "sang tiếng Việt. Dịch sát nghĩa, đầy đủ, không bịa đặt. Tên huyệt, vị thuốc, "
+                 "bài thuốc và bệnh danh dùng âm Hán-Việt. Chỉ trả về bản dịch, không lời dẫn hay bình luận.")
+USER_PROMPT = "{text}\n\nDịch sang tiếng Việt."
 
 
 def _json_default(o: Any):
@@ -92,16 +90,16 @@ class TranslateConfig:
     """Cấu hình bước dịch. Mọi trường đều có thể sửa từ notebook."""
 
     engine: str = "hf"                      # hf | dummy
-    model: str = "Qwen/Qwen2.5-7B-Instruct"
+    model: str = "erax-ai/EraX-Translator-V1.0"
     input_dir: str = "work/runs"            # thư mục chứa .txt (glob đệ quy)
     books: list[str] = field(default_factory=list)  # [] = tất cả; tên hoặc glob
     workdir: str = "work"
     run_name: str = ""                      # "" = tên model
-    gpu_per_model: int = 2                  # 1: model <= 4B; 2: model 7-8B
+    gpu_per_model: int = 1                  # T4 x2: mỗi GPU một worker EraX
     load_4bit: bool = False
-    batch: int = 8
+    batch: int = 2
     chunk_chars: int = 300
-    max_new_tokens: int = 1200
+    max_new_tokens: int = 1024
     temperature: float = 0.0
     repetition_penalty: float = 1.05
     limit: int | None = None                # giới hạn tổng số đoạn (chạy thử)
