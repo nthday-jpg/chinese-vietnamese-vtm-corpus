@@ -351,6 +351,7 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
         "--paddle-version", cfg.paddle_version,
         "--paddle-args", json.dumps(cfg.paddle_args, ensure_ascii=False),
         "--batch-size", str(cfg.batch_size),
+        "--cpu-workers", str(cfg.cpu_workers),
         "--page-timeout", str(cfg.page_timeout),
         *extra,
     ]

@@ -223,11 +223,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--paddle-version", default="v1.6")
     ap.add_argument("--paddle-args", default="{}", help="json tham số thêm cho PaddleOCRVL")
     ap.add_argument("--batch-size", type=int, default=1, help="số trang mỗi GPU/worker Paddle")
+    ap.add_argument("--cpu-workers", type=int, default=0,
+                    help="process render PDF song song/worker GPU; 0 = render tuần tự")
     ap.add_argument("--limit", type=int, default=None, help="chỉ chạy N trang (chạy thử)")
     ap.add_argument("--page-timeout", type=int, default=300, help="giây tối đa/trang, quá thì bỏ trang đó")
     a = ap.parse_args(argv)
     if a.batch_size < 1:
         ap.error("--batch-size phải > 0")
+    if a.cpu_workers < 0:
+        ap.error("--cpu-workers phải >= 0")
     name, out = a.name or a.engine, Path(a.out)
 
     tasks = [json.loads(l) for l in open(a.tasks, encoding="utf-8") if l.strip()]
@@ -261,7 +265,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     engine = ENGINES[a.engine](a)
-    if a.engine == "paddle" and a.batch_size > 1:
+    if a.engine == "paddle" and (a.batch_size > 1 or a.cpu_workers > 0):
         try:
             run_paddle_batches(a, engine, todo, out, name, inflight)
         finally:
@@ -301,6 +305,32 @@ def main(argv: list[str] | None = None) -> None:
     inflight.unlink(missing_ok=True)
     for d in _DOCS.values():  # đóng PDF, khỏi in cảnh báo pypdfium2 vào log
         d.close()
+
+
+def _render_to_file(src, page, dpi, max_side, path):
+    """Process con: render 1 trang và ghi PNG; trả (width, height)."""
+    img = render(src, page, dpi, max_side)
+    try:
+        img.save(path)
+        return img.width, img.height
+    finally:
+        img.close()
+
+
+class _RenderPool:
+    """Render song song nhiều process; spawn để con không thừa hưởng trạng thái CUDA."""
+
+    def __init__(self, workers):
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        self.pool = ProcessPoolExecutor(
+            max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+
+    def submit(self, src, page, dpi, max_side, path):
+        return self.pool.submit(_render_to_file, src, page, dpi, max_side, str(path))
+
+    def close(self):
+        self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 def run_paddle_batches(a, engine, todo, out, name, inflight):
@@ -346,29 +376,59 @@ def run_paddle_batches(a, engine, todo, out, name, inflight):
             completed += 1
             print(f"[{name}#{a.shard}] {completed}/{len(todo)} {task['book']} tr.{task['page'] + 1}: {len(text)} ký tự", flush=True)
 
-    print(f"[{name}#{a.shard}] batch_size={a.batch_size} trang/GPU", flush=True)
-    with tempfile.TemporaryDirectory(prefix="paddle_batch_") as temporary:
-        for start in range(0, len(todo), a.batch_size):
-            items = []
-            for index, task in enumerate(todo[start:start + a.batch_size]):
-                (out / task["book"]).mkdir(parents=True, exist_ok=True)
-                path = Path(temporary) / f"{index}.png"
-                try:
-                    signal.alarm(a.page_timeout)
-                    img = render(task["src"], task["page"], a.dpi, a.max_side)
+    workers = max(0, int(getattr(a, "cpu_workers", 0) or 0))
+    print(f"[{name}#{a.shard}] batch_size={a.batch_size} trang/GPU, "
+          f"cpu_workers={workers} (0 = render tuần tự)", flush=True)
+    batches = [todo[i:i + a.batch_size] for i in range(0, len(todo), a.batch_size)]
+    pool = _RenderPool(workers) if workers else None
+    try:
+        with tempfile.TemporaryDirectory(prefix="paddle_batch_") as temporary:
+            def prepare(batch, index):
+                """Render trước 1 batch; trả [(task, path, w, h)] cho GPU."""
+                futures = []
+                for j, task in enumerate(batch):
+                    (out / task["book"]).mkdir(parents=True, exist_ok=True)
+                    path = Path(temporary) / f"b{index}_{j}.png"
+                    if pool is not None:
+                        futures.append((task, path, pool.submit(
+                            task["src"], task["page"], a.dpi, a.max_side, path)))
+                        continue
                     try:
-                        img.save(path)
-                        items.append((task, path, img.width, img.height))
+                        signal.alarm(a.page_timeout)
+                        img = render(task["src"], task["page"], a.dpi, a.max_side)
+                        try:
+                            img.save(path)
+                            futures.append((task, path, (img.width, img.height)))
+                        finally:
+                            img.close()
+                    except Exception as exc:  # noqa: BLE001 - 1 trang lỗi không dừng lượt
+                        print(f"Render lỗi {task['book']} tr.{task['page'] + 1}: {exc}", flush=True)
                     finally:
-                        img.close()
-                except Exception as exc:
-                    print(f"Render lỗi {task['book']} tr.{task['page'] + 1}: {exc}", flush=True)
-                finally:
-                    signal.alarm(0)
-            infer(items)
-            inflight.unlink(missing_ok=True)
-            for _, path, _, _ in items:
-                path.unlink(missing_ok=True)
+                        signal.alarm(0)
+                items = []
+                for task, path, result in futures:
+                    try:
+                        if pool is not None:
+                            width, height = result.result(timeout=a.page_timeout)
+                        else:
+                            width, height = result
+                        items.append((task, path, width, height))
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"Render lỗi {task['book']} tr.{task['page'] + 1}: {exc}", flush=True)
+                return items
+
+            # Render trước batch kế tiếp trong lúc GPU chạy batch hiện tại.
+            pending = prepare(batches[0], 0) if batches else []
+            for index, _ in enumerate(batches):
+                items = pending
+                pending = prepare(batches[index + 1], index + 1) if index + 1 < len(batches) else []
+                infer(items)
+                inflight.unlink(missing_ok=True)
+                for _, path, _, _ in items:
+                    path.unlink(missing_ok=True)
+    finally:
+        if pool is not None:
+            pool.close()
 
 
 if __name__ == "__main__":

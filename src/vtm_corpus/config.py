@@ -53,6 +53,7 @@ class OCRConfig:
     paddle_version: str = "v1.6"            # v1.6 | v1.5
     paddle_args: dict = field(default_factory=dict)
     batch_size: int = 1                     # số trang/worker GPU (Paddle)
+    cpu_workers: int = 0                    # process render PDF song song/worker GPU
     limit: int | None = None                # giới hạn tổng số trang (chạy thử)
     page_timeout: int = 300                 # giây/trang
     n_gpu: int = 0                          # 0 = tự phát hiện
@@ -70,6 +71,8 @@ class OCRConfig:
     def __post_init__(self) -> None:
         if type(self.batch_size) is not int or self.batch_size < 1:
             raise ValueError("batch_size phải là số nguyên > 0")
+        if type(self.cpu_workers) is not int or self.cpu_workers < 0:
+            raise ValueError("cpu_workers phải là số nguyên >= 0")
         if self.engine not in ("hunyuan", "paddle", "dummy"):
             raise ValueError(f"engine không hợp lệ: {self.engine}")
         if self.dtype not in ("fp32", "fp16", "bf16"):
@@ -82,6 +85,7 @@ class OCRConfig:
             "input_dir", "workdir", "run_name", "limit", "page_timeout", "n_gpu",
             "worker_python", "budget_h", "stall_min", "max_restarts", "n_layout",
             "layout_budget_h", "export", "fresh", "resume_from",
+            "batch_size", "cpu_workers",  # chỉ ảnh hưởng tốc độ, không đổi kết quả từng trang
         })
 
     def to_dict(self) -> dict:
