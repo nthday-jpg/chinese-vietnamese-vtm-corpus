@@ -156,11 +156,18 @@ class Paddle:
         print(f"[model] Paddle: model sẵn sàng, sau {time.monotonic() - started:.1f}s", flush=True)
 
     def run(self, img_path):
+        return self.run_batch([img_path])[0]
+
+    def run_batch(self, img_paths):
         try:
-            res = list(self.pipe.predict(img_path, max_new_tokens=self.max_new))[0]
-        except TypeError:  # bản paddleocr cũ chưa nhận max_new_tokens
-            res = list(self.pipe.predict(img_path))[0]
-        return self.parse(res.json)
+            results = list(self.pipe.predict(img_paths, max_new_tokens=self.max_new))
+        except TypeError as exc:  # chỉ fallback nếu keyword không được hỗ trợ
+            if "max_new_tokens" not in str(exc):
+                raise
+            results = list(self.pipe.predict(img_paths))
+        if len(results) != len(img_paths):
+            raise ValueError(f"Paddle trả {len(results)} kết quả cho {len(img_paths)} ảnh")
+        return [self.parse(res.json) for res in results]
 
     @staticmethod
     def parse(j):
@@ -215,9 +222,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default="auto", help="auto/cpu/cuda/cuda:1 (hunyuan)")
     ap.add_argument("--paddle-version", default="v1.6")
     ap.add_argument("--paddle-args", default="{}", help="json tham số thêm cho PaddleOCRVL")
+    ap.add_argument("--batch-size", type=int, default=1, help="số trang mỗi GPU/worker Paddle")
     ap.add_argument("--limit", type=int, default=None, help="chỉ chạy N trang (chạy thử)")
     ap.add_argument("--page-timeout", type=int, default=300, help="giây tối đa/trang, quá thì bỏ trang đó")
     a = ap.parse_args(argv)
+    if a.batch_size < 1:
+        ap.error("--batch-size phải > 0")
     name, out = a.name or a.engine, Path(a.out)
 
     tasks = [json.loads(l) for l in open(a.tasks, encoding="utf-8") if l.strip()]
@@ -230,12 +240,19 @@ def main(argv: list[str] | None = None) -> None:
     # trang đang chạy dở khi worker bị giết vì treo -> ghi vào skip, không thử lại
     inflight = out / f"_inflight_{name}_{a.shard}"
     if inflight.exists():
-        book, _, p = inflight.read_text().rpartition("|")
-        if book and (book, int(p)) not in done:
-            with open(out / book / f"{name}_skip.log", "a") as f:
-                f.write(p + "\n")
-            skip.add((book, int(p)))
-            print(f"[{name}#{a.shard}] {book} trang {int(p) + 1}: bị treo ở lần trước -> bỏ qua", flush=True)
+        marker = inflight.read_text()
+        if marker.startswith("["):
+            # Batch bị ngắt: thử lại từng trang, không bỏ qua cả batch.
+            a.batch_size = 1
+            print(f"[{name}#{a.shard}] batch bị ngắt -> thử lại với batch_size=1", flush=True)
+        else:
+            book, _, p = marker.rpartition("|")
+            if book and (book, int(p)) not in done:
+                (out / book).mkdir(parents=True, exist_ok=True)
+                with open(out / book / f"{name}_skip.log", "a") as f:
+                    f.write(p + "\n")
+                skip.add((book, int(p)))
+                print(f"[{name}#{a.shard}] {book} trang {int(p) + 1}: bị treo ở lần trước -> bỏ qua", flush=True)
         inflight.unlink()
     seen = done | skip
     todo = [t for t in mine if (t["book"], t["page"]) not in seen][:a.limit]
@@ -244,6 +261,13 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     engine = ENGINES[a.engine](a)
+    if a.engine == "paddle" and a.batch_size > 1:
+        try:
+            run_paddle_batches(a, engine, todo, out, name, inflight)
+        finally:
+            for d in _DOCS.values():
+                d.close()
+        return
     tmp = Path(tempfile.mkdtemp()) / "page.png"
 
     def on_timeout(signum, frame):
@@ -277,6 +301,74 @@ def main(argv: list[str] | None = None) -> None:
     inflight.unlink(missing_ok=True)
     for d in _DOCS.values():  # đóng PDF, khỏi in cảnh báo pypdfium2 vào log
         d.close()
+
+
+def run_paddle_batches(a, engine, todo, out, name, inflight):
+    """Batch đầu vào mỗi GPU; checkpoint vẫn là từng trang, lỗi thì chia đôi."""
+    def on_timeout(signum, frame):
+        raise TimeoutError("quá ngân sách batch")
+
+    signal.signal(signal.SIGALRM, on_timeout)
+    completed = 0
+
+    def infer(items):
+        nonlocal completed
+        if not items:
+            return
+        inflight.write_text(json.dumps([{"book": t[0]["book"], "page": t[0]["page"]} for t in items]))
+        started = time.time()
+        try:
+            signal.alarm(a.page_timeout * len(items))
+            results = engine.run_batch([str(item[1]) for item in items])
+        except Exception as exc:
+            signal.alarm(0)
+            if len(items) > 1:
+                print(f"[{name}#{a.shard}] batch {len(items)} lỗi: {exc}; chia đôi", flush=True)
+                middle = len(items) // 2
+                infer(items[:middle])
+                infer(items[middle:])
+            else:
+                task = items[0][0]
+                if isinstance(exc, TimeoutError):
+                    with open(out / task["book"] / f"{name}_skip.log", "a") as f:
+                        f.write(f"{task['page']}\n")
+                print(f"[{name}#{a.shard}] {task['book']} tr.{task['page'] + 1}: LỖI {exc}", flush=True)
+            return
+        finally:
+            signal.alarm(0)
+        seconds = round((time.time() - started) / len(items), 1)
+        for (task, path, width, height), (text, extra) in zip(items, results):
+            rec = {"page": task["page"], "text": text, "w": width, "h": height,
+                   "sec": seconds, **extra}
+            with open(result_file(out, task["book"], name, a.shard), "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.flush()
+            completed += 1
+            print(f"[{name}#{a.shard}] {completed}/{len(todo)} {task['book']} tr.{task['page'] + 1}: {len(text)} ký tự", flush=True)
+
+    print(f"[{name}#{a.shard}] batch_size={a.batch_size} trang/GPU", flush=True)
+    with tempfile.TemporaryDirectory(prefix="paddle_batch_") as temporary:
+        for start in range(0, len(todo), a.batch_size):
+            items = []
+            for index, task in enumerate(todo[start:start + a.batch_size]):
+                (out / task["book"]).mkdir(parents=True, exist_ok=True)
+                path = Path(temporary) / f"{index}.png"
+                try:
+                    signal.alarm(a.page_timeout)
+                    img = render(task["src"], task["page"], a.dpi, a.max_side)
+                    try:
+                        img.save(path)
+                        items.append((task, path, img.width, img.height))
+                    finally:
+                        img.close()
+                except Exception as exc:
+                    print(f"Render lỗi {task['book']} tr.{task['page'] + 1}: {exc}", flush=True)
+                finally:
+                    signal.alarm(0)
+            infer(items)
+            inflight.unlink(missing_ok=True)
+            for _, path, _, _ in items:
+                path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

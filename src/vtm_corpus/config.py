@@ -52,6 +52,7 @@ class OCRConfig:
     device: str = "auto"                    # auto | cpu | cuda | cuda:1
     paddle_version: str = "v1.6"            # v1.6 | v1.5
     paddle_args: dict = field(default_factory=dict)
+    batch_size: int = 1                     # số trang/worker GPU (Paddle)
     limit: int | None = None                # giới hạn tổng số trang (chạy thử)
     page_timeout: int = 300                 # giây/trang
     n_gpu: int = 0                          # 0 = tự phát hiện
@@ -67,6 +68,8 @@ class OCRConfig:
     resume_from: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if type(self.batch_size) is not int or self.batch_size < 1:
+            raise ValueError("batch_size phải là số nguyên > 0")
         if self.engine not in ("hunyuan", "paddle", "dummy"):
             raise ValueError(f"engine không hợp lệ: {self.engine}")
         if self.dtype not in ("fp32", "fp16", "bf16"):
