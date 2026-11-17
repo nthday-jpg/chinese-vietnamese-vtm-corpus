@@ -18,7 +18,7 @@ import time
 
 from .pdf_images import acquire_pdf_image
 from .image_preparation import projection_gaps, projection_mask, _partition_box
-from .restoration_classical import EXTRA_CLASSICAL, classical_parameters, extra_classical_variant
+EXTRA_CLASSICAL = ()
 
 
 IMAGE_DATASET_FORMAT = "vtm-image-dataset"
@@ -55,24 +55,13 @@ class ImageDatasetConfig:
             raise ValueError("Invalid projection thresholds")
         if (not isinstance(self.variants, list) or "original" not in self.variants
                 or len(set(self.variants)) != len(self.variants)
-                or set(self.variants)-{"original", "bicubic_x2", "bicubic_x4", "denoised", "clahe", *EXTRA_CLASSICAL}):
+                or set(self.variants)-{"original"}):
             raise ValueError("variants require original and supported classical names")
-        if set(self.variant_options)-{"clahe", "denoised", *EXTRA_CLASSICAL}:
-            raise ValueError("Unknown variant_options")
-        for name, options in self.variant_options.items():
-            if name in EXTRA_CLASSICAL:
-                classical_parameters(name, options)
-                continue
-            if name == 'denoised':
-                continue  # Conservative NLM limits are checked at transformation time.
-            if set(options)-{"clip_limit", "tile_grid"}:
-                raise ValueError(f"Unknown {name} parameters")
-            if not 0 < options.get("clip_limit", 1.5) <= 4 or not 2 <= options.get("tile_grid", 8) <= 32:
-                raise ValueError("CLAHE clip_limit must be (0,4], tile_grid [2,32]")
+        if self.variant_options:raise ValueError('Source baseline has no transformation options')
         dataset_validate_cuts(self.column_cuts)
         for page, cuts in self.page_column_cuts.items():
             if not str(page).isdigit() or int(page) < 1:
-                raise ValueError("page_column_cuts uses 1-based page keys")
+                raise ValueError('page_column_cuts uses 1-based page keys')
             dataset_validate_cuts(cuts)
 
 
@@ -97,7 +86,7 @@ def dataset_code_signature():
         return IMAGE_DATASET_CODE_SIGNATURE
     root = Path(__file__).parent
     return dataset_hash({name: dataset_file_hash(root/name) for name in
-                         ("image_dataset.py", "image_preparation.py", "pdf_images.py", "restoration_classical.py", "restoration_registry.py")})
+                         ("image_dataset.py", "image_preparation.py", "pdf_images.py", "restoration_registry.py")})
 
 
 def dataset_environment():
@@ -301,43 +290,8 @@ def dataset_plan_layout(image, config, *, page=0):
 
 
 def dataset_variant(image, name, options):
-    from PIL import Image
-    if name in EXTRA_CLASSICAL:
-        return extra_classical_variant(image, name, options)
-    if name == "original":
-        return image, {"method":"identity","parameters":{},"warnings":[]}
-    if name in {"bicubic_x2", "bicubic_x4"}:
-        scale = 2 if name == 'bicubic_x2' else 4
-        return image.resize((image.width*scale,image.height*scale),Image.Resampling.BICUBIC), {
-            "method":"bicubic","parameters":{"scale":scale},
-            "warnings":["experimental_interpolation; no_recovered_source_detail"]}
-    if name == "clahe":
-        try:
-            import cv2
-            import numpy as np
-        except ImportError as exc:
-            raise RuntimeError("clahe requires an already available OpenCV/NumPy installation; use original offline") from exc
-        params = {"clip_limit":1.5,"tile_grid":8,**options}
-        lab = cv2.cvtColor(np.asarray(image.convert("RGB")),cv2.COLOR_RGB2LAB)
-        grid = int(params["tile_grid"])
-        lab[:,:,0] = cv2.createCLAHE(clipLimit=float(params["clip_limit"]),tileGridSize=(grid,grid)).apply(lab[:,:,0])
-        return Image.fromarray(cv2.cvtColor(lab,cv2.COLOR_LAB2RGB)), {
-            "method":"clahe_lab_l","parameters":params,"opencv":cv2.__version__,
-            "warnings":["experimental_contrast; inspect_weak_strokes"]}
-    if name == 'denoised':
-        import cv2
-        import numpy as np
-        defaults = {'h': 2., 'template_window': 7, 'search_window': 21}
-        params = {**defaults, **options}
-        if (set(options)-set(defaults) or not isinstance(params['h'], (int,float)) or not math.isfinite(params['h']) or not 0 < params['h'] <= 5 or
-                any(not isinstance(params[k], int) or params[k] % 2 != 1 for k in ('template_window', 'search_window')) or
-                not 3 <= params['template_window'] <= params['search_window'] <= 63):
-            raise ValueError('Conservative NLM requires 0<h<=5 and odd windows 3..63')
-        lab = cv2.cvtColor(np.asarray(image.convert('RGB')), cv2.COLOR_RGB2LAB)
-        lab[:, :, 0] = cv2.fastNlMeansDenoising(lab[:, :, 0], None, float(params['h']), params['template_window'], params['search_window'])
-        return Image.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)), dict(method='nlm_lab_l', parameters=params,
-            warnings=['may_remove_weak_strokes; opt_in_visual_review_required'])
-    raise ValueError(f"Unsupported image variant: {name}")
+    if name != 'original':raise ValueError(f'Removed image transformation: {name}; use original')
+    return image, {'method':'identity','parameters':{},'warnings':[]}
 
 
 def dataset_validate_page(root, record, *, check_pixels=True):

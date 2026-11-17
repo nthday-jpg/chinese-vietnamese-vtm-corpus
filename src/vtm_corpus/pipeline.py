@@ -358,6 +358,7 @@ def _ocr_cmd(cfg: OCRConfig, raw_dir: Path, tasks: Path, shard: int, nshard: int
               "image_dataset_key", "image_variant", "image_crop_type", "image_dataset_fallback",
               "image_content_key", "allow_generated_variants")}),
         "--max-new", str(cfg.max_new_tokens), "--dtype", cfg.dtype,
+        "--attention-backend", cfg.attention_backend,
         "--model", cfg.model, "--model-revision", cfg.model_revision, "--prompt", cfg.prompt,
         "--tonggu-repo", cfg.tonggu_repo, "--tonggu-config", cfg.tonggu_config,
         "--rep-penalty", str(cfg.repetition_penalty),

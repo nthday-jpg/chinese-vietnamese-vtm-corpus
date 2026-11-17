@@ -1,20 +1,24 @@
 # Luồng xử lý
 
-PDF gốc → ảnh canonical tùy chọn → từng OCR chạy tuần tự → checkpoint →
-đối chiếu/báo cáo → người đọc chọn bản Hán → dịch tiếng Việt.
+Notebook 0 kiểm tra môi trường → notebook 1a OCR gốc → notebook 1 đếm/phục dựng → người đọc chọn bản Hán → notebook 2 dịch.
 
-Xem [sơ đồ và cơ chế đã triển khai](docs/pipeline.md). Coverage tìm ứng viên từ
-ảnh nguồn; consensus so các OCR; stability so biến thể trong từng engine.
-Chúng hỗ trợ rà soát, không chứng minh bản chép đúng.
+[Notebook 1a](1a_ocr_anh_goc.ipynb) và [notebook 1](1_ocr_va_so_sanh.ipynb) chạy Kaggle offline, có thể khác phiên:
 
-[Hướng dẫn vận hành](docs/usage.md) mô tả thứ tự notebook 0 → 1 (tùy chọn, phiên
-riêng) → 3 → 2, chạy mẫu nhỏ, đọc checkpoint và runtime offline. Mặc định notebook
-3 chọn một PDF/một trang để smoke. Giữ nguồn,
-manifest, checkpoint và các phương án chưa phân định; người đọc chuẩn bị TXT
-đã chọn cho dịch. Workflow dịch hiện chưa xác nhận hoàn toàn offline.
+1. Notebook 1a lấy ảnh nguồn, crop và chạy bốn OCR trên original, giữ raw/checkpoint để resume.
+   Chỉ xuất gói handoff, không tính consensus/coverage hoặc tạo ZIP báo cáo riêng.
+2. Tải `original_ocr_handoff.zip`, đặt cùng PDF trong `DATA_DIR` của notebook 1.
+3. Notebook 1 kiểm gói dữ liệu, dùng lại ảnh/raw, đếm theo nhiều ngưỡng và xuất `original_ocr_analysis.zip`.
+4. Mặc định `RESTORATION_THRESHOLDS=None`, chưa chạy restoration/OCR. Sau khi xem số liệu mới điền ngưỡng.
+5. Khi đã cấu hình, phục dựng vùng mà cả 6 cặp đều qua ngưỡng, OCR phần phục dựng và xuất HTML/JSONL/ZIP.
 
-Các hướng chưa triển khai được tách trong [giả thuyết nghiên cứu](docs/hypotheses.md).
+Các nhánh chọn lọc giữ original ở vùng không phục dựng và ghi rõ provenance;
+trang không có vùng chọn không OCR lặp. TADiSR, DiffTSR và UniHIR giữ tích hợp nhưng
+chưa thực thi khi ngưỡng là None. DiffTSR chỉ dành cho dòng ngang đã duyệt.
 
-Kiến trúc hiện tại: Notebook 1 tạo immutable Kaggle Dataset; Notebook 3 dùng lại
-ảnh và raw checkpoint trong phiên độc lập. Restoration Ablation và Visual
-Fidelity đã có mã và test CPU, xem [pipeline](docs/pipeline.md).
+Bước ảnh chưa hoàn tất ở notebook 1a dừng trước OCR. Chạy lại dùng cache/checkpoint đã có.
+`RUN_OCR=False` bỏ qua ảnh/model, chỉ đọc và xuất lại checkpoint tại `WORK_DIR`.
+Notebook chuẩn bị ảnh cũ, notebook 3 và các notebook 1b đã được thay thế.
+
+Xem [pipeline](docs/pipeline.md) và [vận hành](docs/usage.md). Giữ nguồn,
+provenance, raw checkpoint và mọi phương án chưa phân định. Consensus, coverage,
+stability và proxy chọn vùng đều không chứng minh độ chính xác OCR.

@@ -13,5 +13,5 @@ Xem [phân tích dữ liệu và giới hạn](docs/problem.md), [pipeline hiệ
 và [cách kiểm chứng các giả thuyết](docs/hypotheses.md). Hợp đồng checkpoint,
 đầu ra TXT/JSONL/HTML cùng điều kiện Kaggle/local nằm trong [vận hành](docs/usage.md).
 
-Notebook 1 chuẩn bị ảnh bất biến; Notebook 3 dùng lại ảnh và raw checkpoint để
-đối chứng restoration, cảnh báo thị giác và rà soát thủ công trong phiên riêng.
+Notebook 1 gộp giữ ảnh và raw checkpoint, chạy OCR, đối chứng restoration và
+rá soát thủ công trong cùng phiên Kaggle.

@@ -1,5 +1,183 @@
 # Vận hành và kiểm chứng
 
+## Hai lượt OCR gốc và phục dựng — 17/11/2026
+
+Dùng [1a_ocr_anh_goc.ipynb](../1a_ocr_anh_goc.ipynb) để lấy ảnh gốc và chạy bốn OCR,
+rồi [1_ocr_va_so_sanh.ipynb](../1_ocr_va_so_sanh.ipynb) để đếm và tiếp tục phục dựng.
+Các notebook 1b vẫn đã xoá. Luồng chính **0 → 1a → 1 → 2**, Kaggle Internet Off;
+hai lượt được tách bằng gói dữ liệu, có thể chạy ở hai phiên khác nhau.
+Notebook 2 dịch và các Dataset models/packages hiện có được giữ nguyên.
+
+**Cấu hình đang lưu đã bật full theo yêu cầu mới nhất**:
+`BOOKS=[]`, `MAX_BOOKS=None`, `PAGES=''`, `LIMIT=None`,
+`CROP_TYPES=['page','group','column']`, `VARIANT_MODE='full'`, `RUN_OCR=True`.
+Lượt đầu điền ba đường dẫn Input trong notebook **1a** rồi Run All.
+
+1. Notebook 1a chỉ chuẩn bị canonical ảnh/crop và chạy bốn OCR trên original, lưu checkpoint rồi tạo
+   `/kaggle/working/original_ocr/original_ocr_handoff.zip`. Đây là gói chuyển tiếp duy nhất;
+   không vào engine restoration/QC, không tính consensus/coverage, không tạo HTML/TXT/ZIP báo cáo riêng.
+   Gói handoff gồm PNG, layout/crop/toạ độ, cấu hình, tasks và raw JSONL của cả bốn model.
+   Không có model weights/runtime; PNG giữ nguyên byte. Raw thiếu/lỗi vẫn được giữ để chẩn đoán.
+   Thư mục ảnh/raw trên ổ vẫn giữ để resume, không cần chuyển riêng sang notebook 1.
+2. Đặt ZIP handoff (hoặc toàn bộ thư mục đã giải nén) cùng PDF vào `DATA_DIR` của notebook 1.
+   Chỉ giữ **một** gói handoff trong DATA_DIR để tránh chọn nhầm chiến dịch/crop.
+   Gói được kiểm SHA-256, nhập sang writable; không ghi vào Kaggle Input.
+3. Notebook 1 mặc định `RESTORATION_THRESHOLDS=None`: đọc checkpoint, tính 6 cặp,
+   xuất `original_ocr_thresholds.csv`, `.json`, `.html` và `original_ocr_analysis.zip` trong WORK_DIR.
+   Bảng quét 5%–80%, bước 5%, theo từng crop; đếm nguồn trùng một lần, trước quota và hợp đồng model.
+   Đồng thời xuất đủ báo cáo/ZIP đối chiếu bốn OCR gốc và crop bất đồng khi có tọa độ đủ tin cậy.
+   Lượt này không setup/nạp/inference OCR hoặc restoration; nguyên raw của mọi model vẫn có trong ZIP.
+4. Sau khi xem phân bố, điền dict ngưỡng đủ phương pháp tại `RESTORATION_THRESHOLDS`,
+   giữ `RUN_OCR=True` để phục dựng/OCR ảnh được chọn. Original dùng trực tiếp checkpoint nhập,
+   không retry/OCR lại kể cả model path của phiên mới đổi. Thiếu/cắt OCR không kích hoạt phục dựng.
+
+Phạm vi BOOKS/PAGES/LIMIT phải nằm trong dữ liệu notebook 1a. Các asset/crop đã chuẩn bị
+được dùng lại, không render PDF hay chia crop lại. Không cần thay Dataset packages/models.
+Notebook 1 giữ báo cáo đầy đủ trước/sau restoration: `images/<phương pháp>/`,
+`ocr/<phương pháp>/<model>/`, `image_ocr.html`, `comparison.jsonl`, raw và ảnh cắt kèm ngữ cảnh.
+Ảnh không đủ tọa độ được ghi rõ thay vì dựng crop giả. Report crop lấy PNG canonical,
+không render lại PDF. Căn chỉnh/đối chiếu gốc được cache theo raw, cấu hình và SHA-256 PDF;
+thay đầu vào hoặc thuật toán sẽ tính lại. Không có vùng phục dựng hợp lệ thì bỏ setup OCR.
+
+Chế độ `full` chọn original + TADiSR + DiffTSR + UniHIR, chạy bốn OCR trên ảnh
+có thể áp dụng, bật coverage, stability, restoration ablation, visual fidelity,
+tự kiểm thử nhúng, kiểm dataset, kiểm codec VAE UniHIR, preview, ảnh ghép,
+ảnh phương pháp riêng, ZIP ảnh phụ và ZIP báo cáo có PNG/TXT/JSONL.
+Mọi restoration đều qua bộ chọn bất đồng từ OCR original, kể cả full. Giới hạn RAM/VRAM,
+pixel nguồn/đầu ra, dung lượng trống, cache native và điều kiện model vẫn giữ.
+DiffTSR được bật nhưng vùng chưa có duyệt dòng ngang 1–24 chữ/geometry phù hợp
+ghi `not_applicable`; không suy duyệt hoặc xoay cột dọc để ép chạy.
+Các nhãn accuracy/rà soát do người đọc vẫn cần người đọc cung cấp.
+Đây là cấu hình đã bật, chưa phải kết quả full inference trên Kaggle.
+
+**Ô cấu hình chính có 14 biến với chú thích.** Chỉ chỉnh
+ô này rồi chọn **Run All**; ô **Cấu hình nâng cao** ngay sau tự ghép đường dẫn,
+profile và `CONFIG`, được đặt thu gọn. Các mode cho phép chuyển giữa full và chạy nhẹ.
+
+| Nhóm trong ô chính | Lựa chọn và tác động |
+|---|---|
+| `PACKAGES_DIR`, `MODELS_DIR`, `DATA_DIR` | Ba đường dẫn Input đã gắn trên Kaggle |
+| `BOOKS`, `MAX_BOOKS` | Chọn sách rồi chặn số sách; `[]` lấy tất cả, `None` bỏ chặn |
+| `PAGES`, `LIMIT` | Trang từ 1 trong từng PDF; `LIMIT` chặn tổng số trang cả lượt. `PAGES=''`, `LIMIT=None` lấy toàn bộ; không dùng 0 |
+| `RUN_OCR` | `True`: tạo ảnh/OCR/báo cáo; `False`: chỉ đọc và xuất checkpoint |
+| `WORK_DIR` | Checkpoint OCR và `output/`; giữ đường dẫn cũ để tiếp tục, đổi để tách lượt OCR |
+| `CROP_TYPES` | `['group']`, `['page']`, `['column']` hoặc phối hợp; chọn nhiều loại tăng tác vụ và số ZIP |
+| `VARIANT_MODE` | `full`: mọi phương pháp và phần phân tích/xuất; `selective`: UniHIR chọn lọc; `baseline`: chỉ original |
+| `RESTORATION_THRESHOLDS` | `None` = chỉ đếm và xuất thống kê. Sau khi xem bảng, điền dict ngưỡng 0..1; tăng = ít inference hơn; cả 6 cặp phải đạt |
+| `UNIHIR_MAX_REGIONS` | Mặc định 12 vùng nguồn/cả lượt, kể cả full; `0` bỏ UniHIR. Không phải số vùng mỗi sách |
+| `EXPORT_IMAGES_AND_OCR` | `True`: gom PNG + OCR từng ảnh vào ZIP; `False`: báo cáo kiểu cũ, ít dữ liệu hơn |
+
+Ví dụ hai sách, mỗi sách năm trang: `BOOKS=['1','2']`, `MAX_BOOKS=None`,
+`PAGES='1-5'`, `LIMIT=None`. Nếu vẫn giữ `MAX_BOOKS=1` hoặc `LIMIT=1` thì các
+giới hạn này vẫn chặn số sách/trang dù đã mở rộng `BOOKS`/`PAGES`.
+Các ví dụ `MODEL_OPTIONS`, `GPU_MAP`, `IMAGE_PREPARATION`, `SELECTIVE_RESTORATION`,
+`PREPARED_IMAGES` và cờ kiểm tra/xuất phụ dưới đây nằm trong ô nâng cao.
+
+- Điền `PACKAGES_DIR`, `MODELS_DIR`, `DATA_DIR`; không cần đường dẫn Input ảnh.
+- `BOOKS`, `MAX_BOOKS`, `PAGES`, `LIMIT`, `CROP_TYPES` dùng chung. Full hiện chọn
+  mọi sách/trang và ba crop; để smoke chọn một sách/một trang và crop group.
+- **Thứ tự mới:** lấy ảnh original → bốn OCR → tính đủ 6 cặp trên cùng canonical
+  region/PNG/source PDF → phục dựng vùng qua ngưỡng → OCR phần phục dựng → xuất ZIP.
+  Không dùng kết quả ảnh đã phục dựng để kích hoạt thêm restoration.
+- Tỷ lệ bất đồng là Levenshtein / độ dài chuỗi dài hơn, bỏ khoảng trắng nhưng giữ
+  nguyên chữ phồn/giản thể và dấu câu. Yêu cầu **mọi cặp** đạt ngưỡng, không dùng trung bình;
+  3 model đồng ý và 1 model khác không kích hoạt. Mỗi model cần ít nhất 8 ký tự,
+  không thiếu/truncated. Những trường hợp này được ghi riêng, không tạo điểm bất đồng giả.
+- Chưa có ngưỡng mặc định khi chưa xem dữ liệu: **RESTORATION_THRESHOLDS=None**.
+  Trần UniHIR **12 vùng/lượt, 2 vùng/PDF, 12 MP nguồn**; TADiSR/DiffTSR **256/512 vùng**, **32/16 MP nguồn**.
+  Đây là trần an toàn, không phải ngân sách tối ưu đã hiệu chỉnh theo ground truth.
+  UniHIR ưu tiên page rồi group/column; hai phương pháp kia ưu tiên column rồi group/page.
+  Mỗi phương pháp chỉ xử lý một mức crop, không nhân việc trên cả page/group/column.
+  Các alias PDF cùng SHA dùng chung quyết định và quota. `excluded_variants` vẫn loại vùng;
+  nhãn duyệt không bỏ qua yêu cầu bất đồng. `selective` chỉ chọn UniHIR với cùng gate.
+- `_dataset/selective_restoration_plan.json` ghi số đo và lý do chọn/bỏ.
+  `WORK_DIR/original_ocr_disagreement.json` lưu đủ 6 tỷ lệ trước restoration.
+  Không có vùng được chọn thì bỏ phương pháp đó trước khi kiểm asset/cài runtime/probe GPU.
+  `VARIANT_MODE='baseline'` tắt hoàn toàn phục dựng.
+- Full bật TADiSR x4 trên crop được chọn. DiffTSR chỉ chấp nhận dòng ngang 1–24 chữ đã duyệt và geometry
+  phù hợp; không xoay/reflow cột dọc. Các phương pháp đã xoá tiếp tục bị từ chối.
+- Mỗi nhánh restoration là đầu vào **kết hợp**: crop được chọn dùng ảnh phục dựng,
+  crop khác giữ nguyên original, provenance `source_observation` và operation/cảnh
+  báo trong raw. Vùng giữ nguyên dùng lại OCR gốc khi khớp ảnh/processor/input-size;
+  trang không có crop phục dựng không OCR lặp ở nhánh đó. Lỗi inference
+  vẫn là lỗi, không bị thay bằng original. Không gọi mọi crop trong nhánh này là ảnh phục dựng.
+- `IMAGE_OUTPUT_DIR/_dataset` giữ ảnh/cache/provenance và nối tự động vào OCR.
+  Bước ảnh nguồn chưa hoàn tất chặn OCR gốc. Worker kết thúc và nhả GPU giữa các
+  giai đoạn OCR gốc/restoration/OCR phục dựng. `OUTPUT_DIR` giữ HTML/JSONL/ZIP. Xuất ảnh riêng
+  (`EXPORT_IMAGE_FOLDERS`, `EXPORT_COMPARISONS`, `EXPORT_DATASET_ZIP`) được bật trong mode full.
+- `RUN_OCR=False` bỏ qua ảnh/model để đọc checkpoint tại `WORK_DIR`; giữ cấu
+  hình crop/variant tương ứng. `EXPORT_RESULTS=True` cho phép xuất lại.
+
+ZIP kết quả mặc định có **ảnh đã tạo và OCR trên từng ảnh** nhờ
+`EXPORT_IMAGES_AND_OCR=True`. Các mục HTML/raw JSONL/ảnh bất đồng như notebook 3
+cũ vẫn có. Giải nén, mở `index.html` rồi chọn **Ảnh đã tạo và OCR trên từng ảnh**:
+
+```text
+<sách>/
+  index.html
+  image_ocr.html
+  image_ocr.jsonl
+  images/<phương pháp>/<sách>-p00001-group001.png
+  ocr/<phương pháp>/<model>/<sách>-p00001-group001.txt
+  ocr/<phương pháp>/<model>/regions.jsonl
+  raw/<model>.jsonl
+  variants/<phương pháp>/<model>.jsonl
+```
+
+PNG giữ nguyên byte. TXT theo đúng vùng và ảnh chuẩn bị có hash khớp checkpoint,
+giữ dự đoán của từng model; JSONL có hash, provenance, kích thước và raw từng vùng.
+Không gán văn bản cả trang cho từng crop nếu checkpoint không có mapping.
+Thiếu OCR hoặc ảnh không khớp được đánh dấu; văn bản toàn trang vẫn giữ trong raw/variants.
+Nhánh UniHIR giữ original ở vùng không phục dựng sẽ liên kết tới PNG original,
+không xuất trùng ảnh dưới nhãn phục dựng. Mask TADiSR chỉ là ảnh chẩn đoán, không
+có OCR trên mask. Model có thể thu/phóng ảnh khi inference; JSONL ghi kích thước
+quan sát được. Khi chọn nhiều crop, ZIP tiếp tục tách theo crop/sách.
+
+Xuất lại bằng `RUN_OCR=False` không chạy model, nhưng cần giữ hoặc gắn `_dataset`
+và trỏ `PREPARED_IMAGES` tới vị trí hiện tại để gom ảnh. Đặt
+`EXPORT_IMAGES_AND_OCR=False` nếu chỉ cần báo cáo kiểu cũ; `EXPORT_CROPS` vẫn
+điều khiển riêng ảnh bất đồng. Bước xuất không cần package hoặc weights mới.
+
+Hunyuan được đặt `IMAGE_PREPARATION['attention_backend']='sdpa'`; log và raw ghi
+backend được model cấu hình. Có thể đặt `auto`, `eager`, `flash_attention_2` khi
+chẩn đoán/tương thích; đổi backend Hunyuan tách checkpoint, không xoá kết quả cũ
+và không làm vô hiệu checkpoint các engine khác. Không tự đổi sang eager hoặc
+tải/build FlashAttention để tăng tốc Hunyuan. UniHIR giữ attention upstream:
+FlashAttention ở packed attention, SDPA ở VAE và các nhánh hỗ trợ.
+
+SDPA không đồng nghĩa luôn chạy kernel Flash. Backend phụ thuộc dtype, GPU,
+shape/mask; các kernel có thể sai khác số học nhỏ. Xem
+[PyTorch SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+và [Transformers attention](https://huggingface.co/docs/transformers/attention_interface).
+Chưa đo speedup hoặc xác minh inference mới trên Kaggle trong lần sửa này.
+
+Các hướng dẫn nhiều phương pháp, hai phiên Kaggle, chuyển `_dataset`, notebook 3
+và 1b phía dưới là **lịch sử trước khi gộp**, không áp dụng cho notebook hiện tại.
+
+## Phạm vi restoration hiện tại — 17/11/2026
+
+Chỉ giữ **ảnh gốc, DiffTSR, TADiSR và UniHIR**. Mặc định Notebook 1 dùng
+`VARIANT_MODE='baseline'`, `VARIANTS=['original']`. Restormer và toàn bộ các
+phương pháp khử nhiễu tổng quát cũng đã bị bỏ theo quyết định mới nhất.
+Chọn `VARIANT_MODE='tadisr_x4'` hoặc `'difftsr'` để thử riêng sau baseline OCR.
+Chọn `VARIANT_MODE='unihir_restoration'` để chạy riêng UniHIR, dùng nguyên các
+Dataset models/packages đang có trên Kaggle. Loader, font, runtime FlashAttention,
+phân bổ nhiều GPU và provenance `generative_reconstruction` đã được khôi phục.
+Không cần tải lại hay upload asset theo thay đổi notebook này. Để OCR lại output
+UniHIR trong notebook 3, chủ động bật `ALLOW_GENERATED_VARIANTS=True`;
+mặc định vẫn dùng ảnh gốc.
+DiffTSR vẫn cần duyệt vùng dòng ngang, không xoay cột dọc để khớp model.
+
+`selected` và tên phương pháp trực tiếp đều từ chối các phương pháp đã bỏ.
+`all_eligible` chỉ gồm danh sách giữ lại và không tự chọn DiffTSR. TADiSR xuất
+thêm `tadisr_text_mask` để chẩn đoán. Không tự động chạy SR trên mọi trang.
+UniHIR đã được loại khỏi `reports/restoration_cleanup_plan.json`; script xóa
+cũng từ chối kế hoạch cũ còn nhắm vào UniHIR/FlashAttention. Không chạy kế hoạch
+xóa cũ. Theo yêu cầu hiện tại chỉ sửa notebook/mã liên quan, không khôi phục asset
+local và không thay đổi Dataset Kaggle từ xa. Dataset kết quả cũ vẫn đọc/ghép được.
+Inference thực tế cần xác minh trên Kaggle.
+Các hướng dẫn nhiều phương pháp phía dưới là lịch sử.
+
 ## Log mới: build FlashAttention hết 90 phút — 13/11/2026
 
 Lượt `restoration_check_20261113_124652_5a3affce` đã qua hardware bốn L4,
@@ -413,8 +591,8 @@ và hợp đồng tọa độ nằm trong [pipeline](pipeline.md); mục tiêu �
 | Notebook | Cách dùng |
 |---|---|
 | [0 — môi trường](../0_kiem_tra_moi_truong_kaggle_offline.ipynb) | Inventory + chế độ Kaggle-only build/probe FlashAttention và UniHIR thật trên một trang; xuất ZIP log kể cả khi lỗi. Không tải mạng, không OCR; local không build/inference. |
-| [1 — chuẩn bị ảnh](../1_chuan_bi_anh_ocr.ipynb) | Phiên riêng: PDF → canonical, biến thể, manifest, QC (kiểm tra chất lượng) và preview; chuyển output thành Dataset. Không bắt buộc cho OCR PDF trực tiếp. |
-| [3 — OCR và rà soát](../3_so_sanh_so_chu_ocr.ipynb) | Chạy từng engine, lưu checkpoint, so sánh và xuất báo cáo offline. |
+| [1 — chuẩn bị ảnh](../1_ocr_va_so_sanh.ipynb) | Phiên riêng: PDF → canonical, biến thể, manifest, QC (kiểm tra chất lượng) và preview; chuyển output thành Dataset. Không bắt buộc cho OCR PDF trực tiếp. |
+| [3 — OCR và rà soát](../1_ocr_va_so_sanh.ipynb) | Chạy từng engine, lưu checkpoint, so sánh và xuất báo cáo offline. |
 | [2 — dịch](../2_dich_han_viet.ipynb) | Dịch TXT Hán đã chọn; kiểm tra `INPUT_DIR` vì local mặc định tìm run OCR mới nhất, chưa chắc là bản đã duyệt. Kaggle vẫn cần mạng để clone/cài repo và tải model. |
 
 ## Môi trường và tài sản offline
@@ -573,10 +751,60 @@ hai trục và kiểm phủ crop hẹp/dài; mỗi model có seed/cache/prefligh
 `STORAGE_RESERVE_BYTES=2*1024**3` cho runtime và checkpoint; có thể đặt giới hạn
 byte cụ thể. Notebook kiểm cả giới hạn lẫn chỗ trống cho file tạm mỗi lần ghi.
 Khi chạm giới hạn, `last_attempt.json` ghi `status=incomplete_storage`; cache
-hoàn tất được giữ, lượt chưa đủ không xuất như dataset hoàn chỉnh. Giữ toàn bộ
+hoàn tất được giữ. Ô xuất vẫn tạo thư mục của từng phương pháp từ phần đã có,
+có nhãn chưa hoàn tất, nhưng không công bố `dataset.json` cho notebook 3. Giữ toàn bộ
 `_dataset/`, giải phóng/thêm dung lượng rồi chạy lại cùng cấu hình và `RESUME=True`.
 Nếu toàn bộ phương pháp và ba loại crop không vừa ổ đĩa, chia lượt theo
 `BOOKS`/`PAGES` và lưu từng lượt; tăng giới hạn không làm tăng dung lượng vật lý.
+
+Luồng chạy theo phương pháp và ghép local:
+
+- Notebook 1 mặc định `VARIANT_MODE='light'`: gom các phép CPU 1x, chạy tối đa
+  `CPU_VARIANT_WORKERS=2` phương pháp đồng thời. Nhóm này không cần GPU.
+- `VARIANT_MODE='docres'`, `'restormer'`, `'docentr_degan'` gom các model tương
+  ứng, vẫn dùng scheduler bốn GPU. Hoặc dùng `'selected'` với `VARIANTS` tự chọn.
+- Đặt trực tiếp `'unihir_restoration'`, `'tadisr_x4'`, `'realesrgan_x4'`,
+  `'docdiff_deblurring'`, `'bicubic_x2'` hoặc `'bicubic_x4'` để chạy riêng cùng
+  original. UniHIR chạy riêng dùng toàn bộ `GPU_IDS`; chạy chung giữ cách chia
+  cũ. TADiSR vẫn giữ placement nhiều GPU. Chưa benchmark lại trên Kaggle.
+- Giữ nguyên PDF, DPI/layout, `BOOKS`/`PAGES` và `CROP_TYPES` để các kết quả
+  khớp cùng vùng. Nếu chia theo sách/trang, cung cấp đủ các phần của mỗi phương
+  pháp trước khi gộp toàn bộ corpus. Không cần lặp lại restore trong lúc ghép.
+- Tải trọn output mỗi lượt về máy, đặt tên thư mục theo nhóm/phương pháp.
+  Notebook 1 mặc định tắt comparison trong phiên GPU, giữ xuất ảnh phương pháp.
+- Notebook ghép 1b của luồng cũ đã được xoá; notebook hiện tại dùng ảnh và OCR
+  trong cùng phiên, không cần bước ghép local này.
+
+Kết quả local có `_dataset/` hoàn chỉnh, các thư mục phương pháp, và
+`comparisons/index.html` cùng PNG ghép. Các nguồn có cùng ảnh/vùng phải thống
+nhất; kết quả khác nhau của cùng phương pháp bị báo xung đột, không tự chọn.
+Thư mục input không bị sửa. Cùng ổ đĩa ưu tiên hardlink; khác ổ thì copy có
+kiểm dung lượng trống. Ảnh trong dataset ghép đọc độc lập, không giữ đường dẫn
+tới các mount Kaggle cũ. Upload toàn bộ `_dataset/` local đã ghép để dùng làm
+`PREPARED_IMAGES` cho notebook 3; không cần sửa notebook 3 hay gắn từng input cũ.
+
+CLI local tương đương (PowerShell, dùng môi trường repo):
+
+```powershell
+.venv/Scripts/python.exe tools/merge_prepared_datasets.py --inputs 'D:/runs/light/_dataset' 'D:/runs/unihir/_dataset' --output 'D:/runs/merged'
+```
+
+Thêm `--no-png` nếu chỉ cần thư mục phương pháp và HTML; thêm `--require-all`
+để yêu cầu đủ mọi phương pháp. `VERIFY_IMAGE_HASHES=False` mặc định bỏ đọc lại
+toàn bộ PNG, còn SHA của metadata/manifest vẫn kiểm khi ghép. Metadata được
+ghi vào snapshot mới và `dataset.json` chỉ công bố khi đủ các cặp phương pháp/vùng.
+
+RAM hệ thống, VRAM và dung lượng đĩa là ba tài nguyên khác nhau. Notebook 1
+in `total_GiB`, `used_GiB`, `free_GiB` của filesystem chứa output và runtime.
+Giới hạn dung lượng ảnh dùng phần **free**, không dùng số RAM hay tổng dung lượng
+ổ đĩa trên giao diện. Với x2/x4 hoặc model chạy lâu, bắt đầu một sách/nhóm trang;
+nếu ước lượng toàn bộ sách còn vừa chỗ trống sau runtime thì mới mở phạm vi.
+
+`comparisons/index.html` so sánh các PNG sẵn có theo cùng trang/crop, không
+nhân đôi dữ liệu ảnh; vẫn dùng được khi ổ đĩa không đủ cho tất cả PNG ghép.
+PNG ghép được xuất thêm trong `comparisons/` khi đủ chỗ. Ô thiếu ghi rõ chưa
+có kết quả. Thư mục phương pháp chưa có ảnh được tạo rỗng. Có thể xuất lại
+cache của lượt bị dừng với `RUN_PREPARATION=False`, không cần chạy lại model.
 
 Kiểm tra preview đường cắt: `vertical_rtl` đọc phải → trái, trên → dưới;
 `horizontal_ltr` dùng cho bố cục ngang. `column_cuts` là tỷ lệ ngang tăng dần
@@ -1007,7 +1235,7 @@ trình bày như một phương pháp đã hoạt động.
 | Nhóm | File |
 |---|---|
 | Tài liệu | `docs/README.md`, `problem.md`, `pipeline.md`, `hypotheses.md`, `usage.md`; `README.md`, `FLOW.md`, `PROBLEM.md` tại root. |
-| Notebook | `1_chuan_bi_anh_ocr.ipynb`, `3_so_sanh_so_chu_ocr.ipynb`; giữ notebook 0 và 2. |
+| Notebook | `1_ocr_va_so_sanh.ipynb`, `1_ocr_va_so_sanh.ipynb`; giữ notebook 0 và 2. |
 | Module mới | `src/vtm_corpus/restoration_evaluation.py`, `restoration_status.py`. |
 | Module được sửa | Trong `src/vtm_corpus/`: `image_dataset.py`, `prepared_variants.py`, `config.py`, `corpus_ocr.py`, `image_preparation.py`, `ocr_records.py`, `multi_compare.py`, `evidence_pipeline.py`, `evidence_report.py`, `book_output.py`. |
 | Bảo trì notebook | Trong `tools/`: `notebook_source_builder.py`, `notebook_ocr_workflow.py`, `rebuild_plain_ocr_notebook.py`; cho phép theo dõi cả `update_kaggle_notebook_bootstrap.py`, `install_kaggle_packages.py` để builder không thiếu dependency trong checkout sạch. |

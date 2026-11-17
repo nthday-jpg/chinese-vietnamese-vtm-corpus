@@ -56,6 +56,7 @@ class OCRConfig:
     resolution_strict: bool = False         # fail rather than downsample an unsplittable region
     model_min_pixels: int | None = None     # None keeps the installed processor's setting
     model_max_pixels: int | None = None
+    attention_backend: str = 'auto'        # auto | sdpa | flash_attention_2 | eager (Hunyuan)
     image_dataset: str = ""                # prepared dataset root or immutable snapshot JSON
     image_dataset_key: str = ""            # bound/verified before checkpoint lookup
     image_variant: str = "original"
@@ -92,6 +93,8 @@ class OCRConfig:
     resume_from: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        if self.attention_backend not in {'auto', 'sdpa', 'flash_attention_2', 'eager'}:
+            raise ValueError('Unsupported attention_backend')
         if self.engine not in ("hunyuan", "paddle", "ppocr", "tonggu", "dummy"):
             raise ValueError(f"engine không hợp lệ: {self.engine}")
         if self.dtype not in ("fp32", "fp16", "bf16"):
@@ -127,6 +130,8 @@ class OCRConfig:
             "worker_python", "worker_wsl_distro", "worker_pythonpath", "budget_h", "stall_min", "max_restarts", "n_layout",
             "layout_budget_h", "export", "fresh", "resume_from",
         }
+        if self.attention_backend == 'auto' or self.engine != 'hunyuan':
+            exclude.add('attention_backend')  # preserve existing non-Hunyuan/auto checkpoints
         if not self.image_content_key:
             exclude.add("image_content_key")
         else:

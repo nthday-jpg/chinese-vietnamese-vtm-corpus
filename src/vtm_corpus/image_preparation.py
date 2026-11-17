@@ -247,17 +247,17 @@ def processor_identity(backend, engine):
     return info
 
 
-def run_prepared_page(backend, image, image_path, cfg, *, page=0):
+def run_prepared_page(backend, image, image_path, cfg, *, page=0, original_record=None):
     """Run all regions transactionally; partial region text never becomes a page."""
     import tempfile
     if cfg.segmentation == "none" and not image.info.get("prepared_dataset"):
         return backend.run(str(image_path))
     # The shared render cache remains immutable while inference reads crops.
     with tempfile.TemporaryDirectory(prefix="vtm-regions-") as directory:
-        return _run_prepared_regions(backend, image, cfg, page=page, directory=Path(directory))
+        return _run_prepared_regions(backend, image, cfg, page=page, directory=Path(directory), original_record=original_record)
 
 
-def _run_prepared_regions(backend, image, cfg, *, page, directory):
+def _run_prepared_regions(backend, image, cfg, *, page, directory, original_record=None):
     from .text_alignment import comparison_text
     from .reading_order import order_ppocr_columns
     prepared = image.info.get("prepared_dataset")
@@ -274,6 +274,9 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
     records, texts, merged, offset = [], [], {}, 0
     native = (prepared["crop_type"] == "native" and cfg.engine in {"paddle", "tonggu"}
               if prepared else layout["method"] == "native_layout")
+    original_preparation = (original_record or {}).get('image_preparation', {})
+    original_regions = {r.get('canonical_region_id'):r for r in original_preparation.get('regions', [])}
+    processor_matches = original_preparation.get('processor_identity') == processor_identity(backend, cfg.engine)
     for i, box in enumerate(boxes):
         if prepared:
             from .image_dataset import dataset_load_image
@@ -289,6 +292,7 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
                         variant=prepared["variant"],variant_sha256=entry["sha256"],
                         operation=entry["operation"],canonical_region_id=prepared["regions"][i]["id"],
                         provenance=entry.get("provenance", "source_observation" if prepared["variant"] == "original" else "deterministic_transformation"),
+                        warnings=entry.get('warnings', []),
                         model_identity=entry.get("model_identity"),
                         coordinate_mapping_evidence=entry.get("coordinate_mapping_evidence", "crop_and_scale_geometry"),
                         input_to_source=[(box[2]-box[0])/crop.width,0,0,(box[3]-box[1])/crop.height,box[0],box[1]])
@@ -298,8 +302,18 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
         crop.save(path, format="PNG")
         import time
         ocr_started = time.monotonic()
+        previous = original_regions.get(meta.get('canonical_region_id')) if processor_matches else None
+        reuse = bool(prepared and meta.get('operation', {}).get('selective_original_fallback') and previous and
+                     previous.get('variant_sha256') == meta.get('variant_sha256') and
+                     previous.get('page_box') == list(box) and previous.get('input_size') == meta.get('input_size'))
         try:
-            text, extra = backend.run(str(path))
+            if reuse:
+                import copy
+                text, extra = previous['text'], copy.deepcopy(previous['raw'])
+                meta['ocr_reused_from_original'] = True
+                meta['original_ocr_seconds'] = previous.get('ocr_seconds')
+            else:
+                text, extra = backend.run(str(path))
         finally:
             path.unlink(missing_ok=True)
         meta['ocr_seconds'] = round(time.monotonic()-ocr_started, 6)
@@ -313,7 +327,7 @@ def _run_prepared_regions(backend, image, cfg, *, page, directory):
                 layout["warnings"].append(f"region_{i}: processor_downsampled (includes patch-grid rounding)")
                 if cfg.resolution_strict:
                     raise ValueError(f"Processor downsampled region {i}: {crop.size} -> {observed[0]}")
-        if cfg.engine == "ppocr":
+        if cfg.engine == "ppocr" and not reuse:
             ordered, order_info = order_ppocr_columns({"text": text, **extra},
                 mode=("auto" if cfg.segmentation == "auto" else "vertical_rtl")
                      if cfg.reading_direction == "vertical_rtl" else "detection")

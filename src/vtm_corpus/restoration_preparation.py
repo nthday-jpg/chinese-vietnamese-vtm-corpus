@@ -5,7 +5,7 @@ import json
 
 from .image_dataset import dataset_read
 from .restoration_registry import variant_spec, preparation_applicability
-from .restoration_classical import EXTRA_CLASSICAL, classical_resource_metadata, classical_parameters
+EXTRA_CLASSICAL = ()
 
 
 def plan_restoration_variants(root, base, config, *, applicability=None):
@@ -25,9 +25,7 @@ def plan_restoration_variants(root, base, config, *, applicability=None):
             for name in config['variants']:
                 spec = variant_spec(name)
                 item = result['by_variant'].setdefault(name, dict(planned_images=0, pixels=0, not_applicable=0,
-                    deselected=0, method=spec, parameters=classical_parameters(name,
-                        config.get('variant_options', {}).get(name, {})) if name in EXTRA_CLASSICAL else
-                        config.get('model_options', {}).get(name, config.get('variant_options', {}).get(name, {}))))
+                    deselected=0, method=spec, parameters=config.get('model_options', {}).get(name, config.get('variant_options', {}).get(name, {}))))
                 result['manifest_rows'] += 1
                 if not selected:
                     item['deselected'] += 1
@@ -44,7 +42,7 @@ def plan_restoration_variants(root, base, config, *, applicability=None):
                 result['planned_output_images'] += 1; result['planned_output_pixels'] += pixels
                 if name != 'original':
                     storage += (3*ow+1)*oh*1.01 + 1024
-                limits = classical_resource_metadata(name, w*h) if name in EXTRA_CLASSICAL else {}
+                limits = {}
                 if pixels > config['max_output_pixels'] or w*h > limits.get('method_max_pixels', float('inf')):
                     result['resource_warnings'].append(dict(book=page['book'], page=page['page']+1,
                         region=region['id'], variant=name, status='resource_exceeded', pixels=pixels,

@@ -1,5 +1,22 @@
 # Pipeline hiện tại
 
+## Pipeline hiện hành — 17/11/2026
+
+Notebook 0 → [1a OCR gốc](../1a_ocr_anh_goc.ipynb) →
+[1 đếm/phục dựng](../1_ocr_va_so_sanh.ipynb) → notebook 2 dịch TXT đã rà soát.
+Notebook 1a lấy ảnh/crop, OCR original bằng bốn model và xuất `original_ocr_handoff.zip`
+gồm ảnh, layout, raw/config/checkpoint. Đặt gói này cùng PDF trong DATA_DIR của notebook 1.
+Notebook 1 nhập bản sao writable, đếm vùng theo nhiều ngưỡng và xuất CSV/HTML/JSON/ZIP.
+`RESTORATION_THRESHOLDS=None` mặc định chưa chạy model; sau khi xem phân bố mới chọn ngưỡng.
+Khi có ngưỡng và bật inference, chỉ phục dựng vùng mà cả 6 cặp đều vượt mức tương ứng;
+không render/crop hay OCR lại original. TADiSR/DiffTSR/UniHIR có quota riêng và giữ điều kiện model.
+Tín hiệu chọn vùng không chứng minh degradation hay accuracy. Xem [cấu hình](usage.md).
+Hunyuan dùng SDPA; UniHIR giữ FlashAttention/SDPA upstream.
+`RUN_OCR=False` bỏ qua ảnh/model để phân tích checkpoint.
+
+Các mục dưới là lịch sử thiết kế. Danh sách phương pháp cũ và cơ chế chuyển dữ liệu
+trước đây không thay thế hợp đồng `original_ocr_handoff.zip` hiện tại.
+
 ## Learned restoration bổ sung ngày 13/11/2026
 
 Đã tích hợp DocEnTR base/8 H-DIBCO2018 và ba task pretrained DE-GAN. Notebook 1

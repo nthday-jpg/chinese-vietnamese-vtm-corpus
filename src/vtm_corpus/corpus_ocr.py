@@ -294,7 +294,8 @@ def run_corpus_engine(manifest_path: str | Path, engine: str, *, gpu=None, cance
         raise ValueError("engine phải là hunyuan, paddle, ppocr hoặc tonggu")
     manifest_path = Path(manifest_path).resolve()
     campaign = json.loads(manifest_path.read_text(encoding="utf-8"))
-    first = json.loads((Path(campaign["pairs"][0][engine]) / "run_manifest.json").read_text(encoding="utf-8"))["config"]
+    first_pair=next((p for p in campaign['pairs'] if not p.get('original_checkpoint_readonly')),campaign['pairs'][0])
+    first = json.loads((Path(first_pair[engine]) / "run_manifest.json").read_text(encoding="utf-8"))["config"]
     budget = float(first.get("budget_h", 24)) * 3600
     max_restarts = int(first.get("max_restarts", 5))
     queue = GPUPageQueue(page_queue) if page_queue else None
@@ -455,7 +456,7 @@ def run_adaptive_corpus_engines(manifest_path, engines, gpu_map):
             cached += len({t['page'] for t in tasks} & done.keys())
             # Each variant has a distinct run directory; book/page alone collide
             # when a multi-variant campaign contains the same PDF several times.
-            jobs.extend((engine, str(directory.resolve()), t) for t in tasks if t['page'] not in done and
+            jobs.extend((engine, str(directory.resolve()), t) for t in tasks if not pair.get('original_checkpoint_readonly') and t['page'] not in done and
                         t.get('prepared_input', {}).get('state', 'ok') == 'ok')
             plans.append((engine, pair, directory, manifest, tasks, name))
         totals[engine] = (campaign['total_pages'], cached)
@@ -510,6 +511,7 @@ def run_adaptive_corpus_engines(manifest_path, engines, gpu_map):
                 raise
         # Only the coordinator updates shared manifests/exports after all writers exit.
         for engine,pair,directory,manifest,tasks,name in plans:
+            if pair.get('original_checkpoint_readonly'):continue
             done = load_results(directory / 'ocr_raw', pair['book'], name)
             wanted = {t['page'] for t in tasks}
             got = len(wanted & done.keys())

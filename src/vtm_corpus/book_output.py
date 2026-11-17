@@ -17,6 +17,8 @@ from .ocr_worker import render
 from .page_consensus import page_consensus_summary, page_structure_overview
 from .evidence_report import (portable_evidence, book_spatial_coverage, book_variant_stability,
                               book_restoration_evaluation, EVIDENCE_JS)
+from .image_ocr_export import export_image_ocr
+from .prepared_variants import cache_prepared_index
 
 
 BOOK_OUTPUT_FORMAT = 'vtm-ocr-book-v1'
@@ -158,7 +160,8 @@ def zip_ocr_book(directory, archive_path):
     return archive_path
 
 
-def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=True, dpi=250, renderer=None):
+def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=True, dpi=250, renderer=None,
+                    include_images=True, prepared_dataset=None):
     """Export selected pages; missing outputs remain explicit and never become votes."""
     started = time.monotonic()
     directory = Path(directory).resolve()
@@ -207,14 +210,39 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     book_write_text(directory, 'errors.jsonl', ''.join(json.dumps(error, ensure_ascii=False) + '\n' for error in errors), generated)
     book_write_text(directory, 'style.css', BOOK_CSS, generated)
     book_write_text(directory, 'reader.js', BOOK_JS + (EVIDENCE_JS if result.get('evidence_schema') else ''), generated)
+    reference_method = next(iter(runs.values()))['manifest']['config'].get('image_variant', 'original')
+    prepared_dataset = prepared_dataset or next((run['manifest']['config'].get('image_dataset') for run in runs.values()
+                                                 if run['manifest']['config'].get('image_dataset')),None)
+    image_runs = {reference_method: runs}
     for variant, variant_result in result.get('variant_results', {}).items():
+        image_runs[variant] = {}
         for model in models:
             vr = load_run(Path(next(p[model] for p in read_jsonl_campaign(variant_result['corpus_manifest']) if p['book'] == book)), model, warnings)
+            image_runs[variant][model] = vr
             selected = [{'page': r['page'], 'status': 'ok' if (book, r['page']-1) in vr['records'] else 'missing_output',
                          'record': vr['records'].get((book, r['page']-1))} for r in rows]
             book_write_text(directory, f'variants/{variant}/{model}.jsonl', ''.join(json.dumps(r, ensure_ascii=False)+'\n' for r in selected), generated)
+    image_export = (export_image_ocr(result, book, directory, rows, image_runs, generated, book_write_text,
+                                    prepared_dataset=prepared_dataset) if include_images else {'status': 'disabled', 'images': 0})
     comparisons, index_rows = [], []
-    render_count = crop_count = structural_overviews = 0
+    render_count = crop_count = structural_overviews = prepared_page_count = 0
+    prepared_source = None
+    if prepared_dataset and include_crops:
+        from .image_dataset import dataset_open, dataset_page, dataset_load_image
+        prepared_source=dataset_open(prepared_dataset)
+    def source_image(row):
+        nonlocal render_count, prepared_page_count
+        # OCR locations are mapped into canonical source pixels. Reuse those
+        # lossless pixels instead of rendering the PDF again for report crops.
+        if prepared_source:
+            root,descriptor=prepared_source
+            source_sha=next(iter(runs.values()))['manifest']['books'][book]['sha256']
+            record=dataset_page(root,descriptor,source_sha,row['page']-1)
+            if record is None:raise ValueError('Prepared source page missing during crop export')
+            prepared_page_count += 1
+            return dataset_load_image(root,record['source'])
+        render_count += 1
+        return (renderer or render)(row['source'],row['page']-1,dpi,100_000)
     for position, row in enumerate(rows):
         page, consensus = row['page'], row['consensus']
         records = {model: runs[model]['records'].get((book, page - 1)) for model in models}
@@ -242,8 +270,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         if diagnostic and include_crops and row['source_verified'] and row['source'] and Path(row['source']).is_file():
             numbers = {n for item in diagnostic['findings'] for n in item['region_ids']}
             if any(r['id'] in numbers and r['location'] for r in diagnostic['regions']):
-                image = (renderer or render)(row['source'],page-1,dpi,100_000)
-                render_count += 1
+                image = source_image(row)
                 overview = page_structure_overview(image,diagnostic)
                 filename = f'crops/p{page:05d}/page_structure.png'
                 book_save_crop(directory,filename,overview,generated)
@@ -251,6 +278,16 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
                 diagnostic['overview'] = filename
                 structural_overviews += 1
         body += '<div id="page-consensus">'+book_page_consensus(diagnostic)+'</div>'
+        selective = row.get('selective_restoration')
+        if selective is not None:
+            selected = selective.get('selected', [])
+            title = ('Phục dựng theo bất đồng OCR' if selective.get('schema') == 'vtm-selective-restoration-v2' else 'UniHIR chọn lọc')
+            body += ('<section><h2>' + title + '</h2><p>' + str(len(selected)) +
+                     ' vùng được chọn cho phục dựng trên trang này. Các vùng còn lại giữ ảnh gốc; '
+                     'nhánh phục dựng có thể kết hợp ảnh gốc và ảnh phục dựng. '
+                     'Trang không có vùng chọn không chạy OCR lặp ở nhánh phục dựng.</p>'
+                     '<p>Tiêu chí chọn vùng chỉ là tín hiệu rà soát, không chứng minh hỏng chữ, sự cần thiết '
+                     'hoặc cải thiện độ chính xác. Lý do chọn/bỏ được lưu trong comparison.jsonl.</p></section>')
         spatial = portable_evidence(row.get('spatial_coverage'), directory, page, generated)
         stability = portable_evidence(row.get('variant_stability'), directory, page, generated)
         restoration = portable_evidence(row.get('restoration_evaluation'), directory, page, generated)
@@ -269,8 +306,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             location = region['localization']
             if location and include_crops and row['source_verified'] and row['source'] and Path(row['source']).is_file():
                 if image is None:
-                    image = (renderer or render)(row['source'], page - 1, dpi, 100_000)
-                    render_count += 1
+                    image = source_image(row)
                 crop, context, rectangle = character_crops(image, location)
                 crop_name = f'crops/p{page:05d}/region_{number:04d}.png'
                 context_name = f'crops/p{page:05d}/region_{number:04d}_context.png'
@@ -303,6 +339,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
             'reasons': row['reasons'], 'missing_models': consensus['missing_models'], 'reference': consensus['reference'],
             'excluded_models': consensus.get('excluded_models', {}), 'reading_order': row.get('reading_order', {}),
             'page_consensus': diagnostic,
+            **({'selective_restoration': selective} if selective is not None else {}),
             **({'evidence_schema': result['evidence_schema'], 'spatial_coverage': spatial,
                 'variant_stability': stability, 'variant_consensus': row.get('variant_consensus'),
                 'restoration_evaluation': restoration} if result.get('evidence_schema') else {}),
@@ -314,7 +351,7 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         index_rows.append(f'<tr data-page="{page}"><td><a href="pages/p{page:05d}.html">Trang {page}</a></td>{cells}<td>{len(consensus["conflicts"])}</td><td>{report_escape(structural)}</td></tr>')
     book_write_text(directory, 'comparison.jsonl', '\n'.join(comparisons) + '\n', generated)
     counts = {model: sum((book, row['page'] - 1) in runs[model]['records'] for row in rows) for model in models}
-    complete = all(count == len(rows) for count in counts.values())
+    complete = all(count == len(rows) for count in counts.values()) and image_export['status'] != 'partial'
     quality_pages = sum(bool(row['consensus'].get('excluded_models')) for row in rows)
     body = f'<header><h1>{report_escape(book)}</h1><p class="status">{ "Đủ output các trang đã chọn" if complete else "Kết quả còn thiếu output"} · {len(rows)} trang</p>'
     body += '<p>Chọn trang để đọc bốn dự đoán và xem ảnh bất đồng. Số trang theo PDF, bắt đầu từ 1.</p>'
@@ -322,6 +359,12 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     if quality_pages:
         body += f'<p class="notice">{quality_pages} trang có output cần kiểm tra và không tham gia bỏ phiếu; xem từng trang để biết model và lý do.</p>'
     body += '<p class="muted">Giữ nguyên thư mục sau khi giải nén. Mở được offline, không cần server.</p></header>'
+    if image_export.get('index_html'):
+        body += ('<section><h2>Ảnh đã tạo và OCR trên từng ảnh</h2>'
+                 '<p><a href="image_ocr.html">Xem ảnh cạnh OCR của bốn model</a> · '
+                 '<a href="image_ocr.jsonl">Metadata và trạng thái ghép ảnh/OCR</a></p>'
+                 '<p>PNG nằm trong images/&lt;phương pháp&gt;/; TXT và JSONL theo từng ảnh nằm trong '
+                 'ocr/&lt;phương pháp&gt;/&lt;model&gt;/. Ảnh gốc và vùng UniHIR giữ nguyên được ghi rõ.</p></section>')
     all_warnings = sorted(set(result.get('warnings', []) + warnings))
     if all_warnings:
         body += '<section class="notice"><h2>Lưu ý dữ liệu</h2><ul>' + ''.join('<li>' + report_escape(value) + '</li>' for value in all_warnings) + '</ul></section>'
@@ -339,8 +382,10 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
         'models': {model: {'done': counts[model], 'selected': len(rows), 'config': runs[model]['manifest']['config'],
                     'source': runs[model]['manifest'].get('books', {}).get(book)} for model in models},
         'warnings': all_warnings, 'crop_regions': crop_count, 'pages_rendered_for_crops': render_count,
+        'prepared_pages_reused_for_crops':prepared_page_count,
         'page_structure_overviews': structural_overviews,
         'quality_review_pages': quality_pages, 'comparison_settings': result.get('settings', {}),
+        'image_ocr': image_export,
         **({'evidence_schema': result['evidence_schema'], 'selected_variants': result.get('selected_variants'),
             'spatial_summary': result.get('spatial_summary'), 'stability_summary': result.get('stability_summary'),
             'variant_manifests': {v: r['manifests'][book] for v, r in result.get('variant_results', {}).items()}}
@@ -357,20 +402,26 @@ def export_ocr_book(result, book, directory, *, include_crops=True, create_zip=T
     return {'book': book, 'directory': str(directory), 'index_html': str(directory / 'index.html'),
             'zip_path': str(archive) if archive else None, 'pages': len(rows), 'status': manifest['status'],
             'crop_regions': crop_count, 'pages_rendered_for_crops': render_count,
+            'prepared_pages_reused_for_crops':prepared_page_count,
+            'prepared_images': image_export['images'], 'image_ocr_status': image_export['status'],
             'export_seconds': round(time.monotonic() - started, 3)}
 
 
-def export_corpus_results(result, output_dir, *, include_crops=True, create_zip=True, dpi=250, renderer=None):
+@cache_prepared_index
+def export_corpus_results(result, output_dir, *, include_crops=True, create_zip=True, dpi=250, renderer=None,
+                          include_images=True, prepared_dataset=None):
     if result.get('crop_results'):
         return [{**artifact,'crop_type':kind} for kind,child in result['crop_results'].items()
                 for artifact in export_corpus_results(child,Path(output_dir)/kind,include_crops=include_crops,
-                    create_zip=create_zip,dpi=dpi,renderer=renderer)]
+                    create_zip=create_zip,dpi=dpi,renderer=renderer,
+                    include_images=include_images,prepared_dataset=prepared_dataset)]
     books = list(dict.fromkeys(row['book'] for row in result['rows']))
     names = [book_output_slug(book) for book in books]
     if len({name.casefold() for name in names}) != len(names):
         names = [f'{name}_{hashlib.sha256(book.encode()).hexdigest()[:8]}' for name, book in zip(names, books)]
     return [export_ocr_book(result, book, Path(output_dir) / name, include_crops=include_crops,
-                           create_zip=create_zip, dpi=dpi, renderer=renderer) for book, name in zip(books, names)]
+                           create_zip=create_zip, dpi=dpi, renderer=renderer,include_images=include_images,
+                           prepared_dataset=prepared_dataset) for book, name in zip(books, names)]
 
 
 def read_jsonl_campaign(path):

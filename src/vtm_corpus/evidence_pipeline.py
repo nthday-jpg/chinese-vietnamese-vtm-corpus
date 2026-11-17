@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import OCRConfig
 from .corpus_ocr import prepare_multi_corpus, write_json
-from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path, dataset_hash
+from .image_dataset import dataset_open, dataset_page, dataset_validate_page, dataset_load_image, dataset_file_hash, dataset_path, dataset_hash, dataset_read
 from .prepared_variants import OCR_IMAGE_VARIANTS, variant_region_entry, select_prepared_ocr_variants, cache_prepared_index
 from .multi_compare import compare_multi_corpus
 from .ocr_records import load_run, read_checkpoint_campaign
@@ -16,11 +16,12 @@ from .spatial_coverage import analyze_spatial_coverage, spatial_settings
 from .variant_stability import analyze_variant_stability, stability_settings, stability_mechanism_groups
 from .restoration_evaluation import evaluate_restoration_page, restoration_evaluation_settings, restoration_comparison_config
 from .restoration_registry import SURVEY_SOURCE_GROUPS
+from .comparison_cache import cached_original_comparison
 
 
 @cache_prepared_index
 def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, cache_renders=True,
-                           crop_types=None, resume_manifest=None, input_plan=None):
+                           crop_types=None, resume_manifest=None, input_plan=None, original_manifest=None):
     if input_plan is None:input_plan={}
     first=next(iter(models.values()))
     variants=select_prepared_ocr_variants(first.image_dataset,variants,allow_generated=first.allow_generated_variants)
@@ -36,8 +37,16 @@ def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, c
             for kind in crop_types:
                 configs={e:OCRConfig(**{**c.to_dict(),'image_crop_type':kind,'workdir':str(root/'crop_runs'/kind)})
                          for e,c in models.items()}
+                original_child=original_manifest
+                if original_manifest:
+                    original_campaign=read_checkpoint_campaign(original_manifest)
+                    if original_campaign.get('crop_manifests'):
+                        if kind not in original_campaign['crop_manifests']:
+                            raise ValueError('Original OCR handoff does not include crop '+kind)
+                        original_child=original_campaign['crop_manifests'][kind]
                 manifest=prepare_variant_corpus(configs,variants,profile_dir=profile_dir,max_books=max_books,
-                    cache_renders=cache_renders,resume_manifest=resume_manifest,input_plan=input_plan)
+                    cache_renders=cache_renders,resume_manifest=resume_manifest,input_plan=input_plan,
+                    original_manifest=original_child)
                 campaign=json.loads(manifest.read_text(encoding='utf8'))
                 combined['crop_manifests'][kind]=str(manifest)
                 combined['pairs'].extend({**p,'crop_type':kind} for p in campaign['pairs'])
@@ -47,6 +56,12 @@ def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, c
             print('Prepared OCR:',len(variants),'methods ×',crop_types,'×',len(models),'models',flush=True)
             return path
         models={e:OCRConfig(**{**c.to_dict(),'image_crop_type':crop_types[0]}) for e,c in models.items()}
+        if original_manifest:
+            original_campaign=read_checkpoint_campaign(original_manifest)
+            if original_campaign.get('crop_manifests'):
+                if crop_types[0] not in original_campaign['crop_manifests']:
+                    raise ValueError('Original OCR handoff does not include crop '+crop_types[0])
+                original_manifest=original_campaign['crop_manifests'][crop_types[0]]
     if (not isinstance(variants, list) or not variants or len(set(variants)) != len(variants)
             or set(variants)-OCR_IMAGE_VARIANTS.keys() or 'original' not in variants):
         raise ValueError('OCR_VARIANTS requires original and unique supported OCR images; masks are excluded')
@@ -60,11 +75,20 @@ def prepare_variant_corpus(models, variants, *, profile_dir=None, max_books=1, c
     for variant in variants:
         configs = {engine: OCRConfig(**{**cfg.to_dict(), 'image_variant': variant,
             'workdir': str(root if variant == 'original' else root/'variant_runs'/variant)}) for engine, cfg in models.items()}
-        manifest = prepare_multi_corpus(configs, profile_dir=profile_dir, max_books=max_books,
-            cache_renders=cache_renders, allow_unavailable_variants=True,resume_manifest=resume_manifest,input_plan=input_plan)
-        campaign = json.loads(manifest.read_text(encoding='utf8'))
+        if variant == 'original' and original_manifest:
+            manifest=Path(original_manifest)
+            campaign=read_checkpoint_campaign(manifest)
+            if campaign.get('variant_manifests'):
+                manifest=Path(campaign['variant_manifests']['original']);campaign=read_checkpoint_campaign(manifest)
+            if campaign.get('crop_manifests'):raise ValueError('Choose original handoff crop before planning variants')
+            if set(campaign['models']) != set(models):raise ValueError('Original checkpoint model set differs')
+        else:
+            manifest = prepare_multi_corpus(configs, profile_dir=profile_dir, max_books=max_books,
+                cache_renders=cache_renders, allow_unavailable_variants=True,resume_manifest=resume_manifest,input_plan=input_plan)
+            campaign = json.loads(manifest.read_text(encoding='utf8'))
         combined['variant_manifests'][variant] = str(manifest)
-        combined['pairs'].extend({**pair, 'variant': variant} for pair in campaign['pairs'])
+        combined['pairs'].extend({**pair, 'variant': variant,
+            **({'original_checkpoint_readonly':True} if variant=='original' and original_manifest else {})} for pair in campaign['pairs'])
         combined['total_pages'] += campaign['total_pages']
         combined['total_books'] = max(combined['total_books'], campaign['total_books'])
     path = root/'multi_variant_manifest.json'
@@ -202,7 +226,7 @@ def variant_difference_artifacts(image, stability, manifests_by_variant, row, di
 def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable_spatial=False,
                              spatial_options=None, stability_options=None, enable_restoration_ablation=False,
                              enable_visual_fidelity=False, restoration_options=None, prepared_dataset=None,
-                             evidence_dir=None, book_groups=None, **comparison_options):
+                             evidence_dir=None, book_groups=None, comparison_cache_dir=None, **comparison_options):
     manifest_path = Path(manifest_path)
     campaign = read_checkpoint_campaign(manifest_path)
     if campaign.get('crop_manifests'):
@@ -211,7 +235,8 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
             enable_restoration_ablation=enable_restoration_ablation,enable_visual_fidelity=enable_visual_fidelity,
             restoration_options=restoration_options,prepared_dataset=prepared_dataset,
             evidence_dir=(Path(evidence_dir) if evidence_dir else manifest_path.parent/'evidence')/kind,
-            book_groups=book_groups,**comparison_options) for kind,path in campaign['crop_manifests'].items()}
+            book_groups=book_groups,comparison_cache_dir=comparison_cache_dir,
+            **comparison_options) for kind,path in campaign['crop_manifests'].items()}
         return {'schema':'vtm-multi-crop-results-v1','models':campaign['models'],'crop_results':children,
             'crop_types':list(children),'selected_variants':campaign['variants'],
             'rows':[{**row,'crop_type':kind} for kind,res in children.items() for row in res['rows']],
@@ -230,10 +255,16 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
             raise ValueError('Reference variant missing from saved campaign')
     else:
         paths = {'original': str(manifest_path)}
-    results = {v: compare_multi_corpus(path, **comparison_options) for v, path in paths.items()}
+    results = {v: (cached_original_comparison(path,comparison_cache_dir,**comparison_options)
+                  if v=='original' and comparison_cache_dir else compare_multi_corpus(path, **comparison_options))
+               for v,path in paths.items()}
+    selective_report = None
     if prepared_dataset:
         # Read-only relocation for evaluation. Raw run manifests/checkpoints stay intact.
         root, descriptor = dataset_open(prepared_dataset)
+        if descriptor.get('restoration'):
+            saved_report = json.loads(dataset_read(root, descriptor['restoration']['report']))
+            selective_report = saved_report.get('configuration', {}).get('_selective_restoration_report')
         for res in results.values():
             for manifests in res['manifests'].values():
                 for manifest in manifests.values():
@@ -259,6 +290,14 @@ def compare_evidence_corpus(manifest_path, *, enable_multi_variant=False, enable
     corpus_summaries = []
     for row in result['rows']:
         book, page = row['book'], row['page']-1
+        if selective_report is not None:
+            def same_page(item):
+                return any(str(alias['book']).removesuffix('.pdf') == str(book).removesuffix('.pdf')
+                           and alias['page'] == page+1 for alias in [item, *item.get('aliases', [])])
+            row['selective_restoration'] = {**selective_report,
+                'selected': [item for item in selective_report['selected'] if same_page(item)],
+                'skipped': [item for item in selective_report['skipped'] if same_page(item)],
+                'input_policy': 'selected crops restored; other crops retain original pixels and provenance'}
         records = {v: {e: run['records'].get((book, page)) for e, run in books[book].items()}
                    for v, books in loaded.items()}
         artifact_root = Path(evidence_dir) if evidence_dir else manifest_path.parent/'evidence'

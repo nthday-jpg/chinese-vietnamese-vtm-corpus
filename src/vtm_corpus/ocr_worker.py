@@ -144,7 +144,14 @@ class Hunyuan:
         revision = {"revision": a.model_revision} if getattr(a, "model_revision", "") else {}
         self.proc = AutoProcessor.from_pretrained(a.model, trust_remote_code=True, use_fast=False, **revision)
         self.processor_default_size = dict(self.proc.image_processor.size)
-        self.model = M.from_pretrained(a.model, dtype=dtype, trust_remote_code=True, **revision).to(self.dev).eval()
+        attention = getattr(a, 'attention_backend', 'auto')
+        load_options = {} if attention == 'auto' else {'attn_implementation': attention}
+        self.model = M.from_pretrained(a.model, dtype=dtype, trust_remote_code=True, **load_options, **revision).to(self.dev).eval()
+        config = self.model.config
+        self.attention_backend = {'requested': attention, 'effective': getattr(config, '_attn_implementation', None),
+            'text': getattr(getattr(config, 'text_config', None), '_attn_implementation', None),
+            'vision': getattr(getattr(config, 'vision_config', None), '_attn_implementation', None)}
+        print('[model] Hunyuan attention:', self.attention_backend, flush=True)
         print(f"[model] Hunyuan: model sẵn sàng trên {self.dev}, sau {time.monotonic() - started:.1f}s", flush=True)
 
     @staticmethod
@@ -173,6 +180,7 @@ class Hunyuan:
         grids = grid.detach().cpu().tolist() if grid is not None else []
         patch = getattr(processor, "patch_size", 16)
         model_input = {"processor": type(processor).__name__, "effective_size": size,
+                       "attention_backend": getattr(self, 'attention_backend', {'requested': 'auto', 'effective': None}),
                        "image_grid_thw": grids,
                        "processed_sizes_wh": [[int(row[2])*patch, int(row[1])*patch] for row in grids],
                        "pixel_values_shape": list(inputs["pixel_values"].shape) if "pixel_values" in inputs else None,
@@ -440,6 +448,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--model-max-pixels", type=int)
     ap.add_argument("--max-new", type=int, default=4096)
     ap.add_argument("--dtype", default="fp16", choices=["fp32", "fp16", "bf16"])
+    ap.add_argument('--attention-backend', default='auto', choices=['auto', 'sdpa', 'flash_attention_2', 'eager'])
     ap.add_argument("--model", default="tencent/HunyuanOCR")
     ap.add_argument("--model-revision", default="")
     ap.add_argument("--tonggu-repo", default="")

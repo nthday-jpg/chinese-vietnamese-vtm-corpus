@@ -19,19 +19,39 @@ def restoration_failure_state(error, *, phase='inference'):
     return 'runtime_incompatible' if phase == 'preflight' else 'inference_failed'
 
 
+def preparation_policy_variants():
+    """Active methods; historical registry identities remain readable."""
+    return ('original', 'tadisr_x4', 'difftsr', 'unihir_restoration')
+
+
+def validate_preparation_selection(selected):
+    allowed = set(preparation_policy_variants()) | {'tadisr_text_mask'}
+    rejected = sorted(set(selected) - allowed)
+    if rejected:
+        raise ValueError('Methods removed from active restoration policy: ' + ', '.join(rejected))
+    return list(selected)
+
+
+def preparation_run_groups():
+    """Source baseline only; text SR must be selected explicitly."""
+    return {'baseline': ['original'], 'light': ['original']}
+
+
 def select_preparation_variants(mode, selected):
     from .restoration_registry import VARIANT_SPECS, UNAVAILABLE_RESTORATION_METHODS
-    classical = [name for name, spec in VARIANT_SPECS.items() if spec[1] in {
-        'source_observation', 'deterministic_transformation'}]
-    neural = [name for name, spec in VARIANT_SPECS.items() if spec[1] in {
-        'neural_restoration', 'generative_reconstruction'} and name != 'difftsr']
+    groups=preparation_run_groups()
+    if mode in groups:return list(groups[mode])
+    if mode == 'full':return list(preparation_policy_variants())
+    if mode == 'selective':return ['original','unihir_restoration']
+    if mode in VARIANT_SPECS:return validate_preparation_selection(list(dict.fromkeys(['original',mode])))
     if mode == 'selected':
         unavailable = {n:UNAVAILABLE_RESTORATION_METHODS[n] for n in selected if n in UNAVAILABLE_RESTORATION_METHODS}
         if unavailable:
             raise ValueError('No runnable upstream/checkpoint for requested methods: '+str(unavailable))
-        return list(selected)
+        return validate_preparation_selection(selected)
     if mode == 'classical':
-        return classical
+        return ['original']
     if mode == 'all_eligible':
-        return classical + neural
-    raise ValueError('VARIANT_MODE must be classical, selected or all_eligible')
+        # DiffTSR still requires explicit selection and reviewed horizontal regions.
+        return [name for name in preparation_policy_variants() if name != 'difftsr']
+    raise ValueError('VARIANT_MODE must be full, selective, a run group, method name, classical, selected or all_eligible')

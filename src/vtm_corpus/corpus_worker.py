@@ -27,6 +27,7 @@ from .gpu_page_queue import GPUPageQueue
 
 def create_engine(engine: str, cfg: OCRConfig):
     args = SimpleNamespace(model=cfg.model, dtype=cfg.dtype, device=cfg.device,
+                           attention_backend=cfg.attention_backend,
                            model_revision=cfg.model_revision, tonggu_repo=cfg.tonggu_repo,
                            tonggu_config=cfg.tonggu_config,
                            max_new=cfg.max_new_tokens, rep_penalty=cfg.repetition_penalty,
@@ -84,6 +85,8 @@ def corpus_book_plan(pair, engine, attempt):
                 pass
     todo = [task for task in tasks if task['page'] not in done and task['page'] not in failed
             and task.get('prepared_input', {}).get('state', 'ok') == 'ok']
+    if pair.get('original_checkpoint_readonly'):
+        todo = []  # A handoff is evidence; continuation never retries original OCR.
     return dict(pair=pair, directory=directory, manifest_file=manifest_file, manifest=manifest,
                 cfg=cfg, name=name, raw=raw, errors=errors, tasks=tasks, done=done, todo=todo)
 
@@ -187,6 +190,17 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                 pair, directory, manifest_file, manifest, cfg, name, raw, errors, tasks, done, todo = (
                     plan[key] for key in ('pair', 'directory', 'manifest_file', 'manifest', 'cfg', 'name',
                                           'raw', 'errors', 'tasks', 'done', 'todo'))
+                if pair.get('original_checkpoint_readonly'):
+                    continue  # Preserve imported raw/config metadata exactly; no export or GPU work.
+                original_done = {}
+                if pair.get('variant', 'original') != 'original':
+                    original_pair = next((p for p in campaign['pairs'] if p.get('variant') == 'original' and
+                        p['book'] == pair['book'] and p.get('crop_type') == pair.get('crop_type')), None)
+                    if original_pair:
+                        original_directory = runtime_path(original_pair[engine])
+                        original_manifest = json.loads((original_directory/'run_manifest.json').read_text(encoding='utf8'))
+                        original_name = original_manifest['config'].get('run_name') or engine
+                        original_done = ocr_worker.load_results(original_directory/'ocr_raw', pair['book'], original_name)
                 if todo and backend is None:
                     load_started = time.monotonic()
                     backend = factory(engine, cfg)
@@ -229,7 +243,8 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
                             image, rendered_path, cache_hit = corpus_page_image(
                                 campaign, manifest, pair['book'], task, cfg, render, image_path)
                             rendered_at = time.monotonic()
-                            text, extra = run_prepared_page(backend, image, rendered_path, cfg, page=page)
+                            text, extra = run_prepared_page(backend, image, rendered_path, cfg, page=page,
+                                                            original_record=original_done.get(page))
                         record = {"page": page, "text": text, "w": image.width, "h": image.height,
                                   "sec": round(time.monotonic() - started, 1), **extra,
                                   'render_cache_hit': cache_hit, 'render_sec': round(rendered_at - started, 3),

@@ -181,6 +181,7 @@ def resolve_variant_page(root, descriptor, record, cfg, *, index=None, report=No
     record = deepcopy(record)
     kind = "page" if cfg.image_crop_type == "native" else cfg.image_crop_type
     states = []
+    selective_originals, restored = 0, 0
     for region in record["regions"]:
         if region["crop_type"] != kind:
             continue
@@ -188,10 +189,26 @@ def resolve_variant_page(root, descriptor, record, cfg, *, index=None, report=No
             entry, _ = variant_region_entry(root, descriptor, record, region, cfg.image_variant,
                 index=index, report=report, allow_generated=cfg.allow_generated_variants)
             region["images"][cfg.image_variant] = entry
+            restored += 1
         except VariantUnavailable as exc:
+            if (cfg.image_variant in {'unihir_restoration','tadisr_x4','difftsr'} and exc.states and
+                    all(s.get('state') == 'not_applicable' and
+                        str(s.get('reason', '')).startswith(('selective_unihir:', 'selective_restoration:')) for s in exc.states)):
+                # A selective campaign is explicitly a mixed input: preserve the
+                # source in unselected regions instead of generating more pixels.
+                region['images'][cfg.image_variant] = {**region['images']['original'],
+                    'provenance': 'source_observation',
+                    'operation': {**region['images']['original'].get('operation', {}),
+                                  'selective_original_fallback': True, 'target_variant': cfg.image_variant},
+                    'warnings': ['selective_restoration: original retained; this region was not restored']}
+                selective_originals += 1
+                continue
             states.extend(exc.states)
     if states:
         raise VariantUnavailable(states)
+    if selective_originals and not restored:
+        raise VariantUnavailable([{'state': 'not_applicable', 'variant': cfg.image_variant,
+            'reason': 'selective_restoration: no selected region on this page; skip duplicate OCR'}])
     return record
 
 

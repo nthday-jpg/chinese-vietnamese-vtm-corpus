@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 from functools import lru_cache
 import io
 import json
@@ -15,6 +16,43 @@ from .restoration_storage import PreparationStorageLimit
 
 
 COMPARISON_EXPORT_VERSION = 1
+
+
+def export_comparison_index(entries,destination,*,methods=None,partial=False):
+    """Compare existing method PNGs interactively, without duplicating their pixels."""
+    destination=Path(destination).resolve();folder=destination/'comparisons';folder.mkdir(parents=True,exist_ok=True)
+    groups={};observed=[]
+    for entry in entries:
+        method,filename=PurePosixPath(entry['name']).parts
+        groups.setdefault(filename,[]).append(method)
+        if method not in observed:observed.append(method)
+    data=json.dumps(dict(methods=list(dict.fromkeys(['original',*(methods or []),*observed])),
+                         groups=dict(sorted(groups.items()))),ensure_ascii=False).replace('<','\\u003c')
+    status='Kết quả chưa hoàn tất — ô thiếu chưa có ảnh' if partial else 'Kết quả đã xuất'
+    document='''<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>So sánh các phương pháp</title><style>body{font:16px system-ui;margin:24px;background:#f3f4f6}header{position:sticky;top:0;background:#f3f4f6;padding:12px 0}select{max-width:70vw;padding:8px}button{padding:8px}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}figure{margin:0;background:white;padding:12px;border:1px solid #ddd}img{width:100%;height:65vh;object-fit:contain}figcaption{font-weight:600;margin-bottom:8px}.missing{color:#777;padding:40px 0}</style>
+<header><h1>So sánh các phương pháp</h1><p>STATUS</p><button id="prev">←</button> <select id="crop"></select> <button id="next">→</button><p id="position"></p></header><main id="panels"></main>
+<script id="data" type="application/json">DATA</script><script>
+const data=JSON.parse(document.getElementById('data').textContent),names=Object.keys(data.groups),select=document.getElementById('crop');
+for(const name of names){const option=document.createElement('option');option.value=name;option.textContent=name;select.append(option)}
+function show(){const name=select.value,available=new Set(data.groups[name]||[]),panels=document.getElementById('panels');panels.replaceChildren();document.getElementById('position').textContent=(select.selectedIndex+1)+' / '+names.length+' trang/crop';
+for(const method of data.methods){const figure=document.createElement('figure'),label=document.createElement('figcaption');label.textContent=method;figure.append(label);if(available.has(method)){const img=document.createElement('img');img.loading='lazy';img.src='../'+encodeURIComponent(method)+'/'+encodeURIComponent(name);img.alt=method+' — '+name;figure.append(img)}else{const missing=document.createElement('p');missing.className='missing';missing.textContent='Chưa có kết quả';figure.append(missing)}panels.append(figure)}}
+select.onchange=show;document.getElementById('prev').onclick=()=>{select.selectedIndex=Math.max(0,select.selectedIndex-1);show()};document.getElementById('next').onclick=()=>{select.selectedIndex=Math.min(names.length-1,select.selectedIndex+1);show()};show();</script></html>'''
+    document=document.replace('STATUS',html.escape(status)).replace('DATA',data)
+    target=folder/'index.html';digest=hashlib.sha256(document.encode('utf8')).hexdigest()
+    receipt_root=destination/'_dataset';receipt='exports/comparison_index_'+dataset_hash(str(destination))+'.json'
+    receipt_path=dataset_path(receipt_root,receipt)
+    previous=json.loads(receipt_path.read_text(encoding='utf8')) if receipt_path.is_file() else {}
+    if target.exists() and dataset_file_hash(target) not in (digest,previous.get('sha256')):
+        raise FileExistsError('Unmanaged or edited comparison index: '+str(target))
+    if not target.is_file() or dataset_file_hash(target)!=digest:
+        temporary=target.with_name('.index.'+uuid.uuid4().hex+'.tmp')
+        try:
+            temporary.write_bytes(document.encode('utf8'));temporary.replace(target)
+        finally:
+            if temporary.exists():temporary.unlink()
+    dataset_write(receipt_root,receipt,dataset_json_bytes({'sha256':digest,'partial':partial,'crops':len(groups)}))
+    return {'index':str(target),'crops':len(groups),'partial':partial}
 
 
 @lru_cache(maxsize=1)
