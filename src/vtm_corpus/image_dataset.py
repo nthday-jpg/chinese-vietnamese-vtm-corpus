@@ -42,8 +42,11 @@ class ImageDatasetConfig:
     min_gap_fraction: float = .006
     variants: list[str] = field(default_factory=lambda: ["original"])
     variant_options: dict = field(default_factory=dict)
+    crop_types: list[str] = field(default_factory=lambda: ["page", "group", "column"])
 
     def __post_init__(self):
+        if not self.crop_types or len(set(self.crop_types)) != len(self.crop_types) or set(self.crop_types)-{"page", "group", "column"}:
+            raise ValueError("Invalid canonical crop types")
         if (self.dpi <= 0 or self.max_source_pixels < 1 or not 32 <= self.analysis_max_side <= 1600
                 or self.columns_per_group < 1 or self.max_columns < 1):
             raise ValueError("Invalid preparation dimensions/group limits")
@@ -205,6 +208,18 @@ def dataset_partition_qc(regions, size, direction):
 def dataset_plan_layout(image, config, *, page=0):
     """Projection baseline, no model/pixel budget; all coordinates in source pixels."""
     from PIL import Image, ImageDraw
+    if config.crop_types == ["page"]:
+        w, h = image.size
+        preview = image.copy()
+        preview.thumbnail((config.analysis_max_side, config.analysis_max_side), Image.Resampling.LANCZOS)
+        aw, ah = preview.size
+        layout = dict(method="whole_page", source_size=[w,h], analysis_size=[aw,ah],
+            analysis_to_source=[w/aw,0,0,h/ah,0,0], reading_direction=config.reading_direction,
+            crop_types=["page"], regions=[dict(id="page_000", crop_type="page", reading_order=0,
+                source_box=[0,0,w,h], overlap=False)], cuts=[], excluded_regions=[], uncertain_regions=[],
+            geometric_coverage=1.0, text_coverage="unverified", warnings=[],
+            thresholds_tested=[], review_status="needs_visual_review")
+        return layout, Image.new("RGB", preview.size, "white"), preview
     analysis = image.copy()
     analysis.thumbnail((config.analysis_max_side, config.analysis_max_side), Image.Resampling.LANCZOS)
     options = {key: getattr(config, key) for key in ("ink_threshold", "gap_ink_fraction", "min_gap_fraction")}
@@ -265,6 +280,8 @@ def dataset_plan_layout(image, config, *, page=0):
         groups.append((min(b[0] for b in chunk),0,max(b[2] for b in chunk),h))
     regions = []
     for kind, boxes in (("page",[full]),("group",groups),("column",columns)):
+        if kind not in config.crop_types:
+            continue
         for index, box in enumerate(boxes):
             regions.append({"id":f"{kind}_{index:03d}","crop_type":kind,"reading_order":index,
                             "source_box":list(box),"overlap":False})
@@ -281,6 +298,7 @@ def dataset_plan_layout(image, config, *, page=0):
             draw.line((item["analysis_x"],0,item["analysis_x"],ah-1),fill="orange",width=2)
     draw.text((3,ah-14), "RTL <-" if config.reading_direction=="vertical_rtl" else "LTR ->",fill="red")
     layout = {"method":method,"source_size":[w,h],"analysis_size":[aw,ah],
+              "crop_types":list(config.crop_types),
               "analysis_to_source":[w/aw,0,0,h/ah,0,0],"reading_direction":config.reading_direction,
               "regions":regions,"cuts":evidence,"excluded_regions":[],
               "uncertain_regions":[r["id"] for r in regions if r["crop_type"]=="column"],
@@ -302,7 +320,7 @@ def dataset_validate_page(root, record, *, check_pixels=True):
         raise ValueError("Source, acquisition and layout size mismatch")
     dataset_read(root,layout["analysis_mask"])
     dataset_read(root,layout["preview"])
-    for kind in ("page","group","column"):
+    for kind in layout.get("crop_types", ("page","group","column")):
         regions = [r for r in layout["regions"] if r["crop_type"]==kind]
         dataset_partition_qc(regions,layout["source_size"],layout["reading_direction"])
     if [r["id"] for r in record["regions"]] != [r["id"] for r in layout["regions"]]:

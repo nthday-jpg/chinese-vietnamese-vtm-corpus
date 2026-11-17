@@ -21,7 +21,7 @@ def restoration_failure_state(error, *, phase='inference'):
 
 def preparation_policy_variants():
     """Active methods; historical registry identities remain readable."""
-    return ('original', 'tadisr_x4', 'difftsr', 'unihir_restoration')
+    return ('original', 'tadisr_x4', 'unihir_restoration')
 
 
 def validate_preparation_selection(selected):
