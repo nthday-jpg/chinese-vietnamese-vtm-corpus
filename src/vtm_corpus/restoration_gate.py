@@ -7,6 +7,7 @@ from pathlib import Path
 from .image_dataset import dataset_open, dataset_read
 from .ocr_records import read_checkpoint_campaign, load_run
 from .text_alignment import comparison_text
+from .config import ocr_model_excluded
 
 
 def restoration_edit_distance(left, right):
@@ -33,10 +34,10 @@ def restoration_edit_distance(left, right):
     return score
 
 
-def restoration_pairwise_scores(observations, *, min_characters=8):
+def restoration_pairwise_scores(observations, *, min_characters=8, engines=None):
     if type(min_characters) is not int or min_characters < 1:
         raise ValueError('min_characters must be a positive integer')
-    engines = ('ppocr', 'tonggu', 'paddle', 'hunyuan')
+    engines = tuple(engines or ('ppocr', 'tonggu', 'paddle', 'hunyuan'))
     texts = {}
     for engine in engines:
         entry = observations.get(engine)
@@ -54,7 +55,8 @@ def restoration_pairwise_scores(observations, *, min_characters=8):
                 denominator=max(len(texts[left]), len(texts[right])),
                 rate=distance/max(len(texts[left]), len(texts[right])))
     return dict(state='ok', pairs=pairs, min_pairwise_rate=min(p['rate'] for p in pairs.values()),
-                mean_pairwise_rate=sum(p['rate'] for p in pairs.values())/6,
+                mean_pairwise_rate=sum(p['rate'] for p in pairs.values())/len(pairs),
+                expected_models=list(engines),expected_pairs=len(pairs),
                 lengths={e:len(t) for e,t in texts.items()})
 
 
@@ -125,8 +127,10 @@ def collect_restoration_disagreements(manifest_path, prepared_dataset, *, min_ch
     visit(manifest_path)
     scores = {}
     for key in canonical:
+        book=canonical[key]['aliases'][0]['book']
+        engines=[e for e in ('ppocr','tonggu','paddle','hunyuan') if not ocr_model_excluded(e,book)]
         scores[key] = (dict(state='ambiguous_alias_ocr', reason='identical source aliases disagree') if key in ambiguous else
-                       restoration_pairwise_scores(observations.get(key, {}), min_characters=min_characters))
+                       restoration_pairwise_scores(observations.get(key, {}), min_characters=min_characters, engines=engines))
         scores[key]['region'] = canonical[key]
     return dict(schema='vtm-original-ocr-disagreement-v1', scores=scores, warnings=warnings,
                 original_manifest=str(Path(manifest_path).resolve()),

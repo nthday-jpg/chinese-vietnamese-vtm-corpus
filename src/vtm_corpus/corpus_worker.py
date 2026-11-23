@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import uuid
 from contextlib import contextmanager, nullcontext
 
-from .config import HUNYUAN_PROMPT, OCRConfig
+from .config import HUNYUAN_PROMPT, OCRConfig, ocr_model_excluded
 from . import ocr_worker
 from .corpus_ocr import now, write_json
 from .pipeline import export_ocr
@@ -173,14 +173,15 @@ def process_corpus(manifest_path: str | Path, engine: str, *, engine_factory=Non
     queue_path = os.environ.get('VTM_OCR_PAGE_QUEUE')
     queue = GPUPageQueue(queue_path) if queue_path else None
     owner = os.environ.get('VTM_OCR_QUEUE_OWNER', attempt)
-    plans = [corpus_book_plan(pair, engine, attempt) for pair in campaign['pairs']]
+    plans = [corpus_book_plan(pair, engine, attempt) for pair in campaign['pairs'] if not ocr_model_excluded(engine,pair['book'])]
     completed = sum(len({task['page'] for task in plan['tasks']} & plan['done'].keys()) for plan in plans)
+    expected_pages = sum(len(plan['tasks']) for plan in plans)
     progress_file = runtime_path(Path(manifest_path).parent) / f'{engine}_progress.json'
     def update_progress():
         if queue is not None:
             return  # The coordinator reads transactional counts; no shared JSON writes.
-        write_json(progress_file, {'engine': engine, 'attempt': attempt, 'pages': campaign['total_pages'],
-            'done': completed, 'missing': campaign['total_pages'] - completed, 'updated': now()})
+        write_json(progress_file, {'engine': engine, 'attempt': attempt, 'pages': expected_pages,
+            'done': completed, 'missing': expected_pages - completed, 'updated': now()})
     update_progress()
     backend = None
     try:

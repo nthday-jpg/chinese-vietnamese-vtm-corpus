@@ -9,14 +9,44 @@ Luồng hiện tại: notebook 0 kiểm tra môi trường →
 Hai notebook OCR/restoration chạy Kaggle offline và có thể ở hai phiên khác nhau.
 Hai file được giữ dưới **1.000.000 byte**. Các ô runtime nội bộ nén lossless, kiểm SHA-256
 trước khi nạp; ô cấu hình và worker OCR vẫn là mã Python thường, không cần tải source ngoài.
-Notebook chuẩn bị ảnh cũ, notebook 3 và các notebook 1b đã được thay thế.
+Notebook chuẩn bị ảnh cũ và notebook 3 đã được thay thế.
+
+## Chạy thử trên Kaggle
+
+- [OCR lại trang lỗi](1d_ocr_lai_trang_loi.ipynb) mặc định chạy Hunyuan trên sách 4 trang 10. Gắn Dataset chứa `original_ocr_readable/` và models. Ô cuối đối chiếu OCR trước/sau và tải ZIP. Chỉnh `TARGETS` để chọn trang/model khác.
+- [Thử UniHIR](1c_chay_thu_unihir_offline.ipynb) mặc định chạy một crop 112×153 px ở sách 4 trang 26. Gắn PDF, models, packages, dùng 4 L4 và một cache FlashAttention khớp ABI. Ô cuối tải PNG sinh cuối, ảnh bicubic đối chứng và log. Dùng [notebook chuẩn bị FlashAttention](0a_chuan_bi_flashattention.ipynb) để tạo wheel khi thiếu cache.
+
+`data/ocr_raw/` chứa năm bản xuất chữ theo cặp `id`, `zh` để so với Golden, gồm bốn model và `api_ocr.json`.
+`data/ocr_raw/api_source/` giữ tám tệp JSONL gốc có tọa độ. PDF, Golden, Golden đã lọc và gói `original_ocr_readable/` phục vụ các notebook và báo cáo.
+Các bản OCR lọc theo Golden nằm trong `reports/cer_filtered_golden/model_text/`.
+Xem [số liệu theo sách và các lỗi OCR](docs/bao_cao_van_de_ocr.md).
 
 Ở notebook 1a, điền `PACKAGES_DIR`, `MODELS_DIR`, `DATA_DIR` chứa PDF rồi Run All.
 Chỉ chạy bốn OCR trên original, lưu ngay **original_ocr_handoff.zip** gồm PNG nguyên byte,
 crop/toạ độ, cấu hình và raw checkpoint của bốn model. Đây là gói chuyển tiếp duy nhất;
 không tính consensus/coverage, không tạo HTML/TXT/ZIP báo cáo theo sách ở notebook 1a.
 Ảnh/raw chưa đóng gói được giữ trên ổ làm cache để resume; chỉ cần chuyển ZIP sang notebook 1.
-Đặt gói handoff (ZIP hoặc thư mục đã giải nén) cùng PDF vào `DATA_DIR` của notebook 1.
+Notebook 1 hiện đọc trực tiếp `DATA_DIR/original_ocr_readable/`. Thư mục local đã
+được chuyển sẵn, gồm `manifest.json`, `images/` và bốn thư mục `hunyuan/`,
+`paddle_vl/`, `ppocr/`, `tonggu/`; mỗi model có một JSON cho mỗi sách.
+Mỗi tệp giữ raw OCR theo trang, cấu hình, tasks và chỉ mục shard, không bỏ bản ghi
+lỗi hoặc trùng. `images/<sách>/` giữ PNG nguyên byte với tên `page_00001.png`,
+`crops/`, `diagnostics/` và `index.json` (đường dẫn tính từ `images/`, trang từ 1).
+Ảnh trùng dùng chung theo index. `images/metadata.json` gom layout, dataset,
+snapshots và acquisition; notebook khôi phục metadata nguyên byte khi nhập.
+Upload thư mục này cùng các PDF nguồn để `DATA_DIR` trên Kaggle giống `data/` local.
+Không cần upload `original_ocr_handoff/` hoặc cây `runs/` cũ. Notebook tạo checkpoint
+nội bộ trong `/kaggle/working`. Giữ nguyên các tệp sau chuyển đổi vì có checksum.
+Để chuyển một bộ handoff đã giải nén khác, chạy:
+
+```powershell
+.venv\Scripts\python.exe tools/convert_readable_ocr.py data/original_ocr_handoff data/original_ocr_readable
+.venv\Scripts\python.exe tools/clean_readable_images.py data/original_ocr_readable tmp/original_images_backup
+```
+
+Gói ZIP cũ vẫn được hỗ trợ; nếu có cả hai, ưu tiên thư mục readable.
+TongGu không áp dụng cho sách `bien`: không giữ OCR của cặp này và không chạy lại
+trong notebook 1a/1. `bien` chỉ dùng PP-OCR, PaddleOCR-VL và Hunyuan (ba cặp đối chiếu).
 Notebook 1 tự nhập bản sao writable, không OCR lại original. Mặc định
 `RESTORATION_THRESHOLDS=None`: đếm vùng theo ngưỡng, xuất **original_ocr_analysis.zip**
 gồm JSON/CSV/HTML và báo cáo đầy đủ của bốn OCR gốc, gồm crop bất đồng khi định vị được.

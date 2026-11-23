@@ -95,7 +95,7 @@ def plan_disagreement_restoration(root, base, config):
             if any(limit is not None and values[name] > limit for name,limit in budget.items()):
                 skipped.append({**item, 'reason':'selective_restoration_budget'})
                 continue
-            selected.append({**item, 'reason':'all_six_original_ocr_pairs_above_threshold'})
+            selected.append({**item, 'reason':'all_eligible_original_ocr_pairs_above_threshold'})
             count += 1; used += item['source_pixels']; by_book[source] = by_book.get(source, 0)+1
             keys[method].extend(alias['key'] for alias in item['aliases'])
         budgets[method] = dict(selected_unique_regions=count, source_pixels=used, limits=budget, threshold=threshold)

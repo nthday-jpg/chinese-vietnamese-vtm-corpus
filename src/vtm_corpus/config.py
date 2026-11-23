@@ -23,6 +23,11 @@ USER_PROMPT = ("Văn bản chữ Hán:\n{text}\n\n"
                "không chép lại chữ Hán, không dịch sang tiếng Anh, không lời dẫn, không giải thích.")
 
 
+def ocr_model_excluded(engine, book):
+    """TongGu is intentionally unavailable for the horizontal bien book."""
+    return engine == 'tonggu' and Path(str(book).replace('\\', '/')).stem.casefold() == 'bien'
+
+
 def _json_default(o: Any):
     if isinstance(o, (set, tuple)):
         return list(o)

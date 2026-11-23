@@ -9,6 +9,7 @@ from .ocr_records import read_json, load_run, check_sources, read_checkpoint_cam
 from .multi_consensus import multi_character_consensus
 from .ocr_quality import page_quality_issues
 from .page_consensus import page_level_consensus, page_consensus_exclusions, page_consensus_summary
+from .config import ocr_model_excluded
 
 
 def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review_threshold=.05,
@@ -46,9 +47,10 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
             seen.add((book, page))
             records = {name: run["records"].get((book, page)) if (book, page) in run["selected"] else None
                        for name, run in runs.items()}
-            candidates = {name: r["text"] if r is not None else None for name, r in records.items()}
+            active_records = {name:r for name,r in records.items() if not ocr_model_excluded(name,book)}
+            candidates = {name: r["text"] if r is not None else None for name, r in active_records.items()}
             quality = page_quality_issues(records)
-            page_diagnostic = (page_level_consensus(records, excluded_models=quality,
+            page_diagnostic = (page_level_consensus(active_records, excluded_models=quality,
                 source_verified=bool(verified.get(book)), options=page_consensus_options)
                 if page_consensus else None)
             if page_diagnostic:
@@ -91,6 +93,7 @@ def compare_multi_corpus(manifest_path, *, max_alignment_cells=8_000_000, review
                 reasons.append("above_review_threshold")
             severe = any(r != "character_conflicts" for r in reasons)
             rows.append({"book": book, "page": page + 1, "source": source,
+                         "excluded_models": [name for name in models if ocr_model_excluded(name,book)],
                          "source_verified": bool(verified.get(book)), "consensus": consensus,
                          "page_consensus": page_diagnostic,
                          "route": "review_page" if severe else "review_characters" if reasons else "agreement_only",

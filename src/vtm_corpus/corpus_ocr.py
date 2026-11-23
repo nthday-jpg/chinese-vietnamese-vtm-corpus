@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm.auto import tqdm
 
-from .config import OCRConfig, load_ocr_config
+from .config import OCRConfig, load_ocr_config, ocr_model_excluded
 from .ocr_worker import load_results
 from .pipeline import _run_dir, list_pdfs, parse_pages, select_entries, export_ocr
 from .worker_paths import to_wsl_path
@@ -156,6 +156,15 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
                     setattr(cfg, identity, getattr(base, identity))
                 cfg.input_dir, cfg.workdir = str(Path(base.input_dir).resolve()), str(workdir)
                 cfg.limit, cfg.n_layout, cfg.fresh, cfg.resume_from = base.limit, 0, False, []
+                if ocr_model_excluded(cfg.engine, book):
+                    directory = workdir/'excluded'/cfg.engine/book
+                    directory.mkdir(parents=True,exist_ok=True)
+                    (directory/'tasks.jsonl').write_text('',encoding='utf8')
+                    write_json(directory/'run_manifest.json',dict(kind='ocr',config=cfg.to_dict(),
+                        excluded=True,status='excluded',reason='horizontal_book_not_supported',
+                        books={book:dict(src=str(source_path.resolve()),pages=[],sha256=source_sha)}))
+                    pair[cfg.engine]=str(directory)
+                    continue
                 # Prepared content/variant identity must be bound before any
                 # prior run/checkpoint is considered reusable.
                 binding_key=(cfg.image_dataset,cfg.image_variant,cfg.image_crop_type,cfg.reading_direction,
@@ -227,12 +236,14 @@ def prepare_multi_corpus(models: dict[str, OCRConfig], profile_dir: str | Path |
 
 def engine_progress(manifest_path: str | Path, engine: str, *, attempt_id=None) -> dict:
     campaign = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    expected_pages=sum(len((Path(pair[engine])/'tasks.jsonl').read_text(encoding='utf8').splitlines())
+        for pair in campaign['pairs'] if not ocr_model_excluded(engine,pair['book']))
     if attempt_id:
         snapshot = Path(manifest_path).parent / f'{engine}_progress.json'
         try:
             state = json.loads(snapshot.read_text(encoding='utf-8'))
             if (state.get('attempt') == attempt_id and state.get('engine') == engine
-                    and state.get('pages') == campaign['total_pages']
+                    and state.get('pages') == expected_pages
                     and type(state.get('done')) is int and 0 <= state['done'] <= state['pages']
                     and state.get('missing') == state['pages'] - state['done']):
                 return {key: state[key] for key in ('pages', 'done', 'missing')}
@@ -242,12 +253,13 @@ def engine_progress(manifest_path: str | Path, engine: str, *, attempt_id=None) 
         return None
     done = 0
     for pair in campaign["pairs"]:
+        if ocr_model_excluded(engine,pair['book']):continue
         directory = Path(pair[engine])
         tasks = [json.loads(line) for line in (directory / "tasks.jsonl").read_text(encoding="utf-8").splitlines() if line]
         pages = {t["page"] for t in tasks}
         cfg = json.loads((directory / "run_manifest.json").read_text(encoding="utf-8"))["config"]
         done += len(pages & load_results(directory / "ocr_raw", pair["book"], cfg.get("run_name") or engine).keys())
-    return {"pages": campaign["total_pages"], "done": done, "missing": campaign["total_pages"] - done}
+    return {"pages": expected_pages, "done": done, "missing": expected_pages - done}
 
 
 def _terminate_worker(process: subprocess.Popen, *, wsl_distro="", pid_file=None, token="") -> None:

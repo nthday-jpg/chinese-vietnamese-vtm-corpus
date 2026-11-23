@@ -9,6 +9,7 @@ from pathlib import Path
 from .ocr_worker import page_lines
 from .reading_order import order_ppocr_columns
 from .ocr_quality import ocr_quality_issues
+from .config import ocr_model_excluded
 
 
 def read_json(path: Path) -> dict:
@@ -97,6 +98,8 @@ def load_run(directory: Path, engine: str, warnings: list[str], *, reading_order
     cfg = manifest.get("config", {})
     if manifest.get("kind") != "ocr" or cfg.get("engine") != engine:
         raise ValueError(f"Expected an OCR {engine} run: {directory}")
+    if manifest.get('excluded') or (manifest.get('books') and all(ocr_model_excluded(engine,b) for b in manifest['books'])):
+        return {'manifest':manifest,'selected':set(),'records':{}}
     name = cfg.get("run_name") or engine
     records = {}
     for path in sorted((directory / "ocr_raw").glob("*/*.jsonl")):
